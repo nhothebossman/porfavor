@@ -9,52 +9,40 @@
 ╚═╝      ╚═════╝ ╚═╝  ╚═╝    ╚═╝     ╚═╝  ╚═╝  ╚═══╝   ╚═════╝ ╚═╝  ╚═╝
 ```
 
-> encrypted · ephemeral · no accounts · works anywhere
+**Encrypted. Ephemeral. No accounts. Works anywhere.**
 
-Anonymous, end-to-end encrypted chat. No server stores your messages. No accounts. No logs. Works over the internet (default) or directly on your local network.
-
----
-
-## Features
-
-- **End-to-end encrypted** — X25519 key exchange + ChaCha20-Poly1305. The relay never sees plaintext.
-- **Room passwords** — `--room <name>` lets only people with the same room name/password join your channel
-- **Private DMs** — per-pair ECDH keys for direct messages, encrypted separately from the group
-- **Online by default** — connects via a Cloudflare-hosted relay so peers don't need to be on the same network
-- **LAN mode** — `--lan` for direct peer-to-peer over mDNS, no relay, no internet needed
-- **Ephemeral** — keys are generated fresh every session, nothing is stored anywhere
-- **Typing indicators** — see when someone is composing a message
-- **Works on** — Windows, macOS, Linux, Android (Termux)
+Por Favor is a terminal chat app built for people who don't want a server reading their messages. End-to-end encrypted, no sign-up, no logs. Close the app and the conversation never happened.
 
 ---
 
 ## Install
 
-**Windows** (PowerShell):
+**Windows** — open PowerShell and run:
 ```powershell
 irm https://raw.githubusercontent.com/nhothebossman/porfavor/master/install.ps1 | iex
 ```
 
-**macOS / Linux**:
+**macOS / Linux:**
 ```bash
 curl -fsSL https://raw.githubusercontent.com/nhothebossman/porfavor/master/install.sh | bash
 ```
 
-**Android (Termux)**:
+**Android (Termux):**
 ```bash
-pkg install curl
-curl -fsSL https://raw.githubusercontent.com/nhothebossman/porfavor/master/install.sh | bash
+pkg install curl && curl -fsSL https://raw.githubusercontent.com/nhothebossman/porfavor/master/install.sh | bash
 ```
+
+That's it. No dependencies, no config files, single binary.
 
 ---
 
-## Usage
+## Quick start
 
-```
-porfavor [options]
+```bash
+porfavor
 ```
 
-On first run you'll be asked for a name. After that it boots straight into chat.
+First run asks for your name. After that it goes straight to chat.
 
 ```
 [sys] booting por favor...
@@ -62,91 +50,127 @@ On first run you'll be asked for a name. After that it boots straight into chat.
 [sys] JAY joined the chat
 [sys] channel open · 2 peers online ✓
 
-18:42:13 [JAY]   yo you on
-18:42:45 [MARK]  yeah lets go
-18:44:01 [YOU]   █
+18:42:13 [JAY]   yo
+18:42:45 [YOU]   hey, finally
+18:43:01 [YOU]   █
 ```
 
-### Flags
-
-| Flag | Default | Description |
-|---|---|---|
-| `--room <name>` | `default` | Room name (acts as a shared password — only peers with the same room can see each other or read messages) |
-| `--name <name>` | saved name | Override your display name for this session |
-| `--lan` | off | Use LAN/mDNS mode instead of the online relay |
-| `--server <url>` | built-in relay | Use a custom relay server (advanced) |
-| `--version` | — | Print version and exit |
-
-### Example: private room
+To chat with a specific group of people, give your room a name. Only people with the same room name can see each other — and read each other's messages.
 
 ```bash
-# All three friends run the same room name:
-porfavor --room supersecretclub
+porfavor --room fridaynight
 ```
 
-Anyone outside that room gets a different encryption key and can't read the messages — even if they're connected to the same relay.
+Share the room name with whoever you want in. Everyone else is locked out at the encryption level.
 
 ---
 
 ## Commands
 
-| Command | Description |
+| Command | What it does |
 |---|---|
-| `/help` | List all commands |
-| `/peers` | Show who is online in your room |
-| `/dm <name> <message>` | Send an end-to-end encrypted private message |
+| `/peers` | See who's online in your room |
+| `/dm <name>` | Open a private conversation with someone |
+| `/dm <name> <message>` | Send a one-off private message |
+| `/back` | Return to group chat from a DM session |
+| `/onetime <name> "message"` | Burn-after-reading message — held until they connect, delivered once, gone forever |
 | `/nick <newname>` | Change your display name |
-| `/me <action>` | Action message (e.g. `/me waves`) |
+| `/me <action>` | Action message — `* JAY waves` |
+| `/connect <ip>` | Connect directly by IP (LAN mode fallback) |
 | `/clear` | Clear the screen |
-| `/quit` | Exit gracefully |
+| `/help` | List all commands |
+| `/quit` | Exit |
 
-LAN mode only:
+### DM sessions
 
-| Command | Description |
-|---|---|
-| `/connect <ip>` | Manually connect to a peer by IP address (useful when mDNS is blocked) |
+`/dm` without a message opens a session. Your prompt changes so you always know who you're talking to:
+
+```
+/dm JAY
+[sys] DM session with JAY · type normally to chat · /back to return
+
+18:44:01 [YOU → JAY]  can you talk?█
+```
+
+Type `/back` to return to the group.
+
+### Burn-after-reading
+
+```
+/onetime MARK "the key is under the mat"
+[sys] ● onetime sealed for MARK · will be delivered when they open it
+```
+
+If MARK is offline, the message waits on the relay — encrypted — until they connect. The moment it's delivered, it's deleted. It can never be sent twice.
+
+MARK sees:
+```
+[● onetime from YOU] the key is under the mat
+[sys] ● burned — this message no longer exists
+```
+
+---
+
+## Flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--room <name>` | `default` | Room name / shared password |
+| `--name <name>` | saved | Override your display name for this session |
+| `--lan` | off | Skip the relay, use direct LAN/mDNS peer discovery |
+| `--server <url>` | built-in | Point to your own relay |
+| `--version` | — | Print version |
 
 ---
 
 ## How it works
 
-### Online mode (default)
+### The relay sees nothing
+
+Por Favor uses a relay to connect peers across the internet — but the relay only ever sees encrypted bytes. Here's what actually happens:
 
 ```
-[YOU] ──── WSS ────► [Cloudflare Relay] ◄──── WSS ──── [PEER]
-              encrypted with room key + per-pair ECDH DM keys
+YOU ──── encrypted ────► relay ◄──── encrypted ──── PEER
+         (room key)                   (room key)
 ```
 
-1. Both peers connect to the relay over WSS (TLS)
-2. The relay only sees **ciphertext** — it routes packets but cannot read them
-3. Your `--room` value is hashed (SHA-256) to produce the room's URL path **and** the encryption key — peers in different rooms can't decrypt each other's messages even if they share the same relay
-4. On connect, each client announces its **X25519 public key** in the join message
-5. Every peer derives a **per-pair shared key** for DMs (ECDH + HKDF), separate from the group key
-6. Group chat uses the **room key** (HKDF of the room name)
-7. DMs use the **per-pair ECDH key**
+1. Your `--room` name is hashed with SHA-256 → becomes the relay URL path (the relay knows a hash, not your room name)
+2. The same room name is run through HKDF-SHA256 → becomes your 32-byte encryption key (the relay never sees this)
+3. Every message is encrypted with ChaCha20-Poly1305 before it leaves your machine
+4. The relay routes ciphertext. That's all it does.
 
-### LAN mode (`--lan`)
+### DMs are even more private
 
+When you connect, you broadcast your X25519 public key. Every peer does the same. Por Favor uses ECDH to derive a **unique key for each pair** — completely separate from the room key. Your DMs can't be decrypted by anyone else in the room, even in theory.
+
+### One-time messages survive offline
+
+The relay stores encrypted one-time messages in Cloudflare Durable Object storage until the recipient connects. It stores ciphertext only — no metadata, no sender identity beyond what's in the envelope. On delivery, it's deleted from storage permanently.
+
+### LAN mode
+
+```bash
+porfavor --lan
 ```
-[YOU] ──── TCP ────► [PEER]  (direct, no relay)
+
+Skips the relay entirely. Discovers peers on your local network via mDNS, connects directly over TCP, does ECDH key exchange peer-to-peer. Nothing leaves your network.
+
+If mDNS is blocked (company WiFi, hotel, etc.) connect manually:
+```
+/connect 192.168.1.42
 ```
 
-1. On startup, Por Favor announces itself via **mDNS** (`_porfavor._tcp`)
-2. On peer discovery, a **TCP connection** is established on port 47200
-3. Both sides exchange X25519 public keys directly, derive a shared secret via HKDF-SHA256
-4. All messages use **ChaCha20-Poly1305** with that shared key
-5. If mDNS is blocked (company WiFi, etc.) use `/connect <ip>` to connect manually
+### Encryption at a glance
 
-### Encryption summary
-
-| Layer | Algorithm | Key source |
+| What | Algorithm | Key |
 |---|---|---|
-| Key exchange | X25519 ECDH | Generated fresh each session |
-| Key derivation | HKDF-SHA256 | `porfavor-v1` / `porfavor-dm-v1` / `porfavor-room-v1` |
-| Message encryption | ChaCha20-Poly1305 | Derived shared key |
-| Room isolation | SHA-256 | Room name → URL path + encryption key |
+| Group messages | ChaCha20-Poly1305 | HKDF(room name) |
+| Direct messages | ChaCha20-Poly1305 | HKDF(X25519 shared secret) |
+| One-time messages | ChaCha20-Poly1305 | HKDF(room name) |
+| Key exchange | X25519 ECDH | Generated fresh every session |
+| Key derivation | HKDF-SHA256 | — |
 
-The relay server (Cloudflare Workers) **never has access to plaintext**. It only sees the room hash (used to route WebSocket connections) and encrypted byte payloads.
+Keys are never stored. Every session starts fresh.
 
 ---
 
@@ -162,54 +186,59 @@ go build -o porfavor .
 ./porfavor
 ```
 
-Cross-compile for another platform:
+Cross-compile for any platform:
 ```bash
-GOOS=linux GOARCH=arm64 go build -o porfavor-linux-arm64 .
+GOOS=linux   GOARCH=arm64 go build -o porfavor-linux-arm64 .
+GOOS=darwin  GOARCH=arm64 go build -o porfavor-mac-arm64 .
+GOOS=windows GOARCH=amd64 go build -o porfavor.exe .
 ```
 
 ---
 
-## Self-hosting the relay (optional)
+## Self-hosting the relay
 
-Por Favor ships with a built-in public relay. If you want your own:
+Por Favor ships with a public relay. If you want your own — takes about 5 minutes:
 
-1. Install [Wrangler](https://developers.cloudflare.com/workers/wrangler/install-and-update/)
-2. Clone the relay source:
-   ```bash
-   git clone https://github.com/nhothebossman/porfavor
-   cd porfavor-relay
-   npm install
-   wrangler deploy
-   ```
-3. Point clients at your relay:
-   ```bash
-   porfavor --server wss://your-worker.workers.dev
-   ```
+```bash
+# Install Wrangler (Cloudflare's CLI)
+npm install -g wrangler
+wrangler login
 
-The relay is a single Cloudflare Worker with Durable Objects — zero infrastructure, free tier covers typical usage.
+# Clone and deploy
+git clone https://github.com/nhothebossman/porfavor
+cd porfavor-relay
+npm install
+wrangler deploy
+```
+
+Then point your clients at it:
+```bash
+porfavor --server wss://your-relay.workers.dev
+```
+
+Runs on Cloudflare's free tier. Zero server to maintain.
 
 ---
 
 ## Troubleshooting
 
-**Peers not finding each other (LAN mode)**
-- Make sure both devices are on the same WiFi/LAN and not in a "client isolation" SSID
-- Try `/connect <ip>` as a fallback — works even when mDNS is blocked
-- Company/hotel WiFi often blocks mDNS — use online mode instead
+**"no peers found" on LAN mode**
+Your network might be blocking mDNS (multicast). Common on company WiFi, hotels, hotspots. Either switch to online mode (default) or use `/connect <ip>` to connect manually.
 
-**Can't connect from Termux / Android**
-- Por Favor uses Google's DNS (8.8.8.8) to work around Termux's broken resolver — make sure you have internet access
-- Online mode works better than LAN mode from mobile
+**Can't connect on Android / Termux**
+Make sure you have internet access. Por Favor bypasses Termux's broken DNS resolver automatically and forces IPv4 — but it still needs a working connection.
 
-**Port 47200 blocked (LAN mode)**
-- Ask your network admin or use online mode instead
+**macOS says the app can't be opened**
+The installer handles this automatically with `xattr`. If you're on an older install, run:
+```bash
+xattr -d com.apple.quarantine ~/.local/bin/porfavor
+```
 
----
-
-## Requirements
-
-- **Online mode**: any internet connection
-- **LAN mode**: same WiFi/LAN, TCP port `47200` open between peers
+**porfavor not found after install**
+Add `~/.local/bin` to your PATH:
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
+```
 
 ---
 
