@@ -1,0 +1,18 @@
+# Binaries
+porfavor
+porfavor.exe
+porfavor-*
+
+# Go
+go.sum
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Local Claude settings
+.claude/
