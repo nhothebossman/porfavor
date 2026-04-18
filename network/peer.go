@@ -27,14 +27,15 @@ const (
 type MsgType string
 
 const (
-	MsgChat   MsgType = "chat"
-	MsgDM     MsgType = "dm"
-	MsgTyping MsgType = "typing"
-	MsgJoin   MsgType = "join"
-	MsgLeave  MsgType = "leave"
-	MsgNick   MsgType = "nick"
-	MsgMe     MsgType = "me"
-	MsgError  MsgType = "error"
+	MsgChat    MsgType = "chat"
+	MsgDM      MsgType = "dm"
+	MsgOneTime MsgType = "onetime"
+	MsgTyping  MsgType = "typing"
+	MsgJoin    MsgType = "join"
+	MsgLeave   MsgType = "leave"
+	MsgNick    MsgType = "nick"
+	MsgMe      MsgType = "me"
+	MsgError   MsgType = "error"
 )
 
 type Envelope struct {
@@ -543,7 +544,7 @@ func (m *Manager) sendError(msg string) {
 }
 
 func isEncrypted(t MsgType) bool {
-	return t == MsgChat || t == MsgDM || t == MsgMe
+	return t == MsgChat || t == MsgDM || t == MsgMe || t == MsgOneTime
 }
 
 func writeFrame(conn net.Conn, data []byte) error {

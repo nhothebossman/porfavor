@@ -120,6 +120,10 @@ func (c *Chat) receiveLoop() {
 		case network.MsgDM:
 			fmt.Printf("%s[DM from %s] %s%s\r\n", brightGreen, env.From, env.Body, reset)
 
+		case network.MsgOneTime:
+			fmt.Printf("%s[● onetime from %s] %s%s\r\n", brightGreen, env.From, env.Body, reset)
+			fmt.Printf("%s[sys] ● burned — this message no longer exists%s\r\n", dim+green, reset)
+
 		case network.MsgTyping:
 			if env.Body == "1" {
 				c.typingFrom = env.From
@@ -244,6 +248,7 @@ func (c *Chat) handleCommand(line string) {
 		fmt.Print("  /dm <name>             — open a private DM session\r\n")
 		fmt.Print("  /dm <name> <message>   — send a one-off private message\r\n")
 		fmt.Print("  /back                  — return to group chat from DM session\r\n")
+		fmt.Print("  /onetime <name> \"msg\"  — burn-after-reading message (held until they connect)\r\n")
 		fmt.Print("  /nick <newname>        — change your name\r\n")
 		fmt.Print("  /me <action>           — action message\r\n")
 		fmt.Print("  /clear                 — clear screen\r\n")
@@ -365,6 +370,36 @@ func (c *Chat) handleCommand(line string) {
 		c.mu.Lock()
 		fmt.Print(clearScreen)
 		c.mu.Unlock()
+
+	case "/onetime":
+		// Parse: /onetime <name> "message in quotes"
+		if len(parts) < 2 {
+			c.mu.Lock()
+			c.sysf(`usage: /onetime <name> "your message"`)
+			c.mu.Unlock()
+			return
+		}
+		target := parts[1]
+		// Extract quoted message from the raw line
+		q1 := strings.Index(line, `"`)
+		q2 := strings.LastIndex(line, `"`)
+		if q1 == -1 || q1 == q2 {
+			c.mu.Lock()
+			c.sysf(`message must be in quotes: /onetime %s "your message"`, target)
+			c.mu.Unlock()
+			return
+		}
+		msg := line[q1+1 : q2]
+		if msg == "" {
+			c.mu.Lock()
+			c.sysf("message cannot be empty")
+			c.mu.Unlock()
+			return
+		}
+		c.mu.Lock()
+		c.sysf("● onetime sealed for %s · will be delivered when they open it", target)
+		c.mu.Unlock()
+		c.mgr.SendTo(target, network.Envelope{Type: network.MsgOneTime, To: target, Body: msg})
 
 	case "/quit", "/exit":
 		c.quit()
