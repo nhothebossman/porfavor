@@ -160,6 +160,13 @@ func pickIP(v4, v6 []net.IP) net.IP {
 	return nil
 }
 
+func setKeepalive(conn net.Conn) {
+	if tc, ok := conn.(*net.TCPConn); ok {
+		_ = tc.SetKeepAlive(true)
+		_ = tc.SetKeepAlivePeriod(30 * time.Second)
+	}
+}
+
 func (m *Manager) connectToPeer(ip net.IP, port int, name string) {
 	m.connMu.Lock()
 	if m.connecting[name] {
@@ -187,6 +194,7 @@ func (m *Manager) connectToPeer(ip net.IP, port int, name string) {
 	if err != nil {
 		return
 	}
+	setKeepalive(conn)
 
 	sharedKey, err := m.ecdhHandshake(conn, true)
 	if err != nil {
@@ -235,6 +243,7 @@ func (m *Manager) listenForIncoming() {
 				continue
 			}
 		}
+		setKeepalive(conn)
 		go m.handleIncoming(conn)
 	}
 }
@@ -448,6 +457,7 @@ func (m *Manager) ConnectToAddr(addr string) error {
 	if err != nil {
 		return fmt.Errorf("could not connect to %s: %w", addr, err)
 	}
+	setKeepalive(conn)
 
 	sharedKey, err := m.ecdhHandshake(conn, true)
 	if err != nil {
