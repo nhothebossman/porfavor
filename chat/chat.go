@@ -222,6 +222,7 @@ func (c *Chat) handleCommand(line string) {
 		fmt.Printf("%s", green)
 		fmt.Print("  /help                  — list commands\r\n")
 		fmt.Print("  /peers                 — list who is online\r\n")
+		fmt.Print("  /connect <ip>          — connect directly by IP (mDNS fallback)\r\n")
 		fmt.Print("  /dm <name> <message>   — private message\r\n")
 		fmt.Print("  /nick <newname>        — change your name\r\n")
 		fmt.Print("  /me <action>           — action message\r\n")
@@ -241,6 +242,27 @@ func (c *Chat) handleCommand(line string) {
 			}
 		}
 		c.mu.Unlock()
+
+	case "/connect":
+		if len(parts) < 2 {
+			c.mu.Lock()
+			c.sysf("usage: /connect <ip>  or  /connect <ip:port>")
+			c.mu.Unlock()
+			return
+		}
+		addr := parts[1]
+		c.mu.Lock()
+		c.sysf("connecting to %s...", addr)
+		c.mu.Unlock()
+		go func() {
+			if err := c.mgr.ConnectToAddr(addr); err != nil {
+				c.mu.Lock()
+				c.clearInput()
+				c.sysf("connect failed: %s", err.Error())
+				c.printPrompt()
+				c.mu.Unlock()
+			}
+		}()
 
 	case "/dm":
 		if len(parts) < 3 {

@@ -12,7 +12,8 @@ import (
 	"porfavor/network"
 )
 
-const version = "1.0.0"
+// Injected at build time via -ldflags "-X main.version=vX.Y.Z"
+var version = "dev"
 
 func main() {
 	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-version") {

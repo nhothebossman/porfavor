@@ -1,0 +1,70 @@
+============================================
+ POR FAVOR — Installation Instructions
+============================================
+
+WINDOWS
+-------
+1. Open PowerShell
+2. Run:
+   irm https://raw.githubusercontent.com/nhothebossman/porfavor/master/install.ps1 | iex
+3. Open a NEW terminal
+4. Type: porfavor
+
+
+LINUX
+-----
+1. Open a terminal
+2. Run:
+   curl -fsSL https://raw.githubusercontent.com/nhothebossman/porfavor/master/install.sh | bash
+3. If "command not found", add to ~/.bashrc or ~/.zshrc:
+   export PATH="$HOME/.local/bin:$PATH"
+   Then run: source ~/.bashrc
+4. Type: porfavor
+
+
+MAC
+---
+1. Open Terminal
+2. Run:
+   curl -fsSL https://raw.githubusercontent.com/nhothebossman/porfavor/master/install.sh | bash
+3. Type: porfavor
+
+
+ANDROID (Termux)
+----------------
+1. Install Termux from F-Droid (NOT the Play Store):
+   https://f-droid.org/packages/com.termux/
+2. Open Termux and run:
+   pkg install curl
+   curl -fsSL https://raw.githubusercontent.com/nhothebossman/porfavor/master/install.sh | bash
+3. Type: porfavor
+
+
+============================================
+ REQUIREMENTS
+============================================
+- All devices must be on the same WiFi network
+- No internet required after install
+- Port 47200 must not be blocked by firewall
+
+
+============================================
+ USAGE
+============================================
+- First run: enter your name when prompted
+- After that: boots straight into chat
+
+Commands:
+  /help                  list all commands
+  /peers                 show who is online
+  /dm <name> <message>   private message
+  /nick <newname>        change your name
+  /me <action>           action message
+  /clear                 clear the screen
+  /quit                  exit
+
+
+============================================
+ GITHUB
+============================================
+https://github.com/nhothebossman/porfavor

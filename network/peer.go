@@ -275,6 +275,9 @@ func (m *Manager) handleIncoming(conn net.Conn) {
 	m.peers[name] = peer
 	m.mu.Unlock()
 
+	// Reply with our own join message
+	m.sendEnvelope(peer, Envelope{Type: MsgJoin, From: m.LocalName, Body: m.LocalName})
+
 	m.Incoming <- Envelope{Type: MsgJoin, From: name}
 
 	go m.readLoop(peer)
@@ -432,6 +435,67 @@ func (m *Manager) HasPeer(name string) bool {
 	return ok
 }
 
+// ConnectToAddr manually connects to a peer by IP address.
+// Port is optional — defaults to ServicePort if not specified.
+// Format: "192.168.1.5" or "192.168.1.5:47200"
+func (m *Manager) ConnectToAddr(addr string) error {
+	// Add default port if missing
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		addr = fmt.Sprintf("%s:%d", addr, ServicePort)
+	}
+
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	if err != nil {
+		return fmt.Errorf("could not connect to %s: %w", addr, err)
+	}
+
+	sharedKey, err := m.ecdhHandshake(conn, true)
+	if err != nil {
+		conn.Close()
+		return fmt.Errorf("handshake failed: %w", err)
+	}
+
+	// Send our join message first
+	if err := m.sendEnvelopeRaw(conn, Envelope{Type: MsgJoin, From: m.LocalName, Body: m.LocalName}); err != nil {
+		conn.Close()
+		return fmt.Errorf("join failed: %w", err)
+	}
+
+	// Read peer's join message to learn their name
+	data, err := readFrame(conn)
+	if err != nil {
+		conn.Close()
+		return fmt.Errorf("no response from peer: %w", err)
+	}
+
+	var env Envelope
+	if err := json.Unmarshal(data, &env); err != nil || env.Type != MsgJoin {
+		conn.Close()
+		return fmt.Errorf("unexpected response from peer")
+	}
+
+	name := env.Body
+	if name == "" {
+		conn.Close()
+		return fmt.Errorf("peer sent empty name")
+	}
+
+	peer := &Peer{Name: name, Conn: conn, SharedKey: sharedKey}
+
+	m.mu.Lock()
+	if _, exists := m.peers[name]; exists {
+		m.mu.Unlock()
+		conn.Close()
+		return fmt.Errorf("already connected to %s", name)
+	}
+	m.peers[name] = peer
+	m.mu.Unlock()
+
+	m.Incoming <- Envelope{Type: MsgJoin, From: name}
+	go m.readLoop(peer)
+	return nil
+}
+
 func (m *Manager) UpdateName(newName string) {
 	old := m.LocalName
 	m.LocalName = newName
@@ -446,6 +510,14 @@ func (m *Manager) sendEnvelope(p *Peer, env Envelope) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	_ = writeFrame(p.Conn, data)
+}
+
+func (m *Manager) sendEnvelopeRaw(conn net.Conn, env Envelope) error {
+	data, err := json.Marshal(env)
+	if err != nil {
+		return err
+	}
+	return writeFrame(conn, data)
 }
 
 func (m *Manager) sendError(msg string) {
