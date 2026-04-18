@@ -26,9 +26,6 @@ esac
 if [ -n "$PREFIX" ] && [ -d "$PREFIX/bin" ]; then
   INSTALL_DIR="$PREFIX/bin"
   IS_TERMUX=1
-elif [ "$GOOS" = "darwin" ]; then
-  INSTALL_DIR="/usr/local/bin"
-  IS_TERMUX=0
 else
   INSTALL_DIR="$HOME/.local/bin"
   IS_TERMUX=0
@@ -60,26 +57,40 @@ fi
 
 chmod +x "$TMP"
 
+# macOS: remove quarantine flag so Gatekeeper doesn't block it
+if [ "$GOOS" = "darwin" ]; then
+  xattr -d com.apple.quarantine "$TMP" 2>/dev/null || true
+fi
+
 # Install
 mkdir -p "$INSTALL_DIR"
 mv "$TMP" "$INSTALL_DIR/$BIN"
 
 echo "  Installed to $INSTALL_DIR/$BIN"
 
-# PATH hint
+# PATH hint — only shown if install dir isn't already in PATH
 if ! echo "$PATH" | grep -q "$INSTALL_DIR"; then
   echo ""
-  echo "  Add to your shell config:"
+  echo "  $INSTALL_DIR is not in your PATH."
+  echo "  Add this line to your shell config:"
+  echo ""
   if [ "$IS_TERMUX" = "1" ]; then
-    echo "    (already in PATH via Termux)"
+    echo "    (Termux: already in PATH)"
+  elif [ "$GOOS" = "darwin" ]; then
+    SHELL_NAME="$(basename "$SHELL")"
+    if [ "$SHELL_NAME" = "zsh" ]; then
+      echo "    echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc && source ~/.zshrc"
+    else
+      echo "    echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bash_profile && source ~/.bash_profile"
+    fi
   else
-    echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
+    echo "    echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.bashrc && source ~/.bashrc"
   fi
+  echo ""
 fi
 
 # Verify
 if "$INSTALL_DIR/$BIN" --version &>/dev/null; then
-  echo ""
   echo "  $("$INSTALL_DIR/$BIN" --version) installed successfully ✓"
 else
   echo "  Installed. Run: porfavor"
