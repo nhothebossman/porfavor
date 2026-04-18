@@ -19,8 +19,8 @@ import (
 )
 
 const (
-	ServiceType = "_porfavor._tcp"
-	ServicePort = 47200
+	ServiceType   = "_porfavor._tcp"
+	ServicePort   = 47200
 	ServiceDomain = "local."
 )
 
@@ -34,6 +34,7 @@ const (
 	MsgLeave  MsgType = "leave"
 	MsgNick   MsgType = "nick"
 	MsgMe     MsgType = "me"
+	MsgError  MsgType = "error"
 )
 
 type Envelope struct {
@@ -63,6 +64,9 @@ type Manager struct {
 
 	connecting map[string]bool
 	connMu     sync.Mutex
+
+	quit   chan struct{}
+	once   sync.Once
 }
 
 func NewManager(name string) *Manager {
@@ -79,31 +83,43 @@ func NewManager(name string) *Manager {
 		privKey:     priv,
 		pubKeyBytes: priv.PublicKey().Bytes(),
 		connecting:  make(map[string]bool),
+		quit:        make(chan struct{}),
 	}
 }
 
 func (m *Manager) Start() {
 	go m.listenForIncoming()
-	// Small delay so our listener is up before announcing
 	time.Sleep(100 * time.Millisecond)
 	go m.announceSelf()
 	go m.browsePeers()
 }
 
+// Shutdown closes all peer connections and stops all network activity.
+func (m *Manager) Shutdown() {
+	m.once.Do(func() {
+		close(m.quit)
+		m.mu.Lock()
+		for _, p := range m.peers {
+			p.Conn.Close()
+		}
+		m.mu.Unlock()
+	})
+}
+
 func (m *Manager) announceSelf() {
 	server, err := zeroconf.Register(m.LocalName, ServiceType, ServiceDomain, ServicePort, nil, nil)
 	if err != nil {
+		m.sendError("mDNS registration failed — peers may not find you: " + err.Error())
 		return
 	}
 	defer server.Shutdown()
-	// Block until process exits
-	ch := make(chan struct{})
-	<-ch
+	<-m.quit
 }
 
 func (m *Manager) browsePeers() {
 	resolver, err := zeroconf.NewResolver(nil)
 	if err != nil {
+		m.sendError("mDNS discovery failed — you may not find peers: " + err.Error())
 		return
 	}
 
@@ -121,7 +137,11 @@ func (m *Manager) browsePeers() {
 		}
 	}()
 
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-m.quit
+		cancel()
+	}()
 	_ = resolver.Browse(ctx, ServiceType, ServiceDomain, entries)
 }
 
@@ -131,7 +151,6 @@ func pickIP(v4, v6 []net.IP) net.IP {
 			return ip
 		}
 	}
-	// Allow loopback for local testing
 	if len(v4) > 0 {
 		return v4[0]
 	}
@@ -186,9 +205,7 @@ func (m *Manager) connectToPeer(ip net.IP, port int, name string) {
 	m.peers[name] = peer
 	m.mu.Unlock()
 
-	// Send our join message
 	m.sendEnvelope(peer, Envelope{Type: MsgJoin, From: m.LocalName, Body: m.LocalName})
-
 	m.Incoming <- Envelope{Type: MsgJoin, From: name}
 
 	go m.readLoop(peer)
@@ -197,14 +214,26 @@ func (m *Manager) connectToPeer(ip net.IP, port int, name string) {
 func (m *Manager) listenForIncoming() {
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", ServicePort))
 	if err != nil {
+		m.sendError(fmt.Sprintf("failed to listen on port %d — incoming connections disabled: %s", ServicePort, err.Error()))
 		return
 	}
 	defer ln.Close()
 
+	// Close listener when shutdown is requested
+	go func() {
+		<-m.quit
+		ln.Close()
+	}()
+
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			continue
+			select {
+			case <-m.quit:
+				return
+			default:
+				continue
+			}
 		}
 		go m.handleIncoming(conn)
 	}
@@ -217,7 +246,6 @@ func (m *Manager) handleIncoming(conn net.Conn) {
 		return
 	}
 
-	// Read the join message to get the peer's name
 	data, err := readFrame(conn)
 	if err != nil {
 		conn.Close()
@@ -256,12 +284,10 @@ func (m *Manager) ecdhHandshake(conn net.Conn, initiator bool) ([]byte, error) {
 	conn.SetDeadline(time.Now().Add(10 * time.Second))
 	defer conn.SetDeadline(time.Time{})
 
-	// Send our pubkey as a raw frame
 	if err := writeFrame(conn, m.pubKeyBytes); err != nil {
 		return nil, err
 	}
 
-	// Read peer pubkey
 	peerPubBytes, err := readFrame(conn)
 	if err != nil {
 		return nil, err
@@ -278,7 +304,6 @@ func (m *Manager) ecdhHandshake(conn net.Conn, initiator bool) ([]byte, error) {
 		return nil, err
 	}
 
-	// Derive symmetric key via HKDF-SHA256
 	hkdfReader := hkdf.New(sha256.New, secret, nil, []byte("porfavor-v1"))
 	key := make([]byte, chacha20poly1305.KeySize)
 	if _, err := io.ReadFull(hkdfReader, key); err != nil {
@@ -309,7 +334,6 @@ func (m *Manager) readLoop(p *Peer) {
 			continue
 		}
 
-		// Decrypt encrypted messages
 		if len(env.Payload) > 0 && len(env.Nonce) > 0 {
 			plain, err := decryptMsg(p.SharedKey, env.Nonce, env.Payload)
 			if err != nil {
@@ -358,12 +382,14 @@ func (m *Manager) Send(env Envelope) {
 	}
 }
 
-func (m *Manager) SendTo(name string, env Envelope) {
+// SendTo sends a message to a specific peer by name.
+// Returns false if the peer is not found.
+func (m *Manager) SendTo(name string, env Envelope) bool {
 	m.mu.RLock()
 	p, ok := m.peers[name]
 	m.mu.RUnlock()
 	if !ok {
-		return
+		return false
 	}
 
 	enc := env
@@ -371,13 +397,14 @@ func (m *Manager) SendTo(name string, env Envelope) {
 	if isEncrypted(enc.Type) {
 		nonce, payload, err := encryptMsg(p.SharedKey, []byte(enc.Body))
 		if err != nil {
-			return
+			return false
 		}
 		enc.Nonce = nonce
 		enc.Payload = payload
 		enc.Body = ""
 	}
 	m.sendEnvelope(p, enc)
+	return true
 }
 
 func (m *Manager) SendTypingStart() {
@@ -398,6 +425,13 @@ func (m *Manager) Peers() []string {
 	return names
 }
 
+func (m *Manager) HasPeer(name string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, ok := m.peers[name]
+	return ok
+}
+
 func (m *Manager) UpdateName(newName string) {
 	old := m.LocalName
 	m.LocalName = newName
@@ -412,6 +446,13 @@ func (m *Manager) sendEnvelope(p *Peer, env Envelope) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	_ = writeFrame(p.Conn, data)
+}
+
+func (m *Manager) sendError(msg string) {
+	select {
+	case m.Incoming <- Envelope{Type: MsgError, Body: msg}:
+	default:
+	}
 }
 
 func isEncrypted(t MsgType) bool {

@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -48,6 +50,14 @@ func (c *Chat) Run() {
 		}
 	}
 	defer c.restore()
+
+	// Handle Ctrl+C and kill signals gracefully
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigs
+		c.quit()
+	}()
 
 	c.bootSequence()
 	go c.receiveLoop()
@@ -114,6 +124,9 @@ func (c *Chat) receiveLoop() {
 
 		case network.MsgNick:
 			c.sysf("%s is now known as %s", env.From, env.Body)
+
+		case network.MsgError:
+			c.sysf("⚠  %s", env.Body)
 		}
 
 		c.printPrompt()
@@ -238,6 +251,14 @@ func (c *Chat) handleCommand(line string) {
 		}
 		target := parts[1]
 		msg := strings.Join(parts[2:], " ")
+
+		if !c.mgr.HasPeer(target) {
+			c.mu.Lock()
+			c.sysf("unknown peer: %s — try /peers", target)
+			c.mu.Unlock()
+			return
+		}
+
 		c.mu.Lock()
 		fmt.Printf("%s[DM → %s] %s%s\r\n", brightGreen, target, msg, reset)
 		c.mu.Unlock()
@@ -350,7 +371,8 @@ func (c *Chat) restore() {
 func (c *Chat) quit() {
 	c.restore()
 	c.mgr.Send(network.Envelope{Type: network.MsgLeave})
-	time.Sleep(100 * time.Millisecond)
+	c.mgr.Shutdown()
+	time.Sleep(150 * time.Millisecond)
 	fmt.Printf("\r\n%s[sys] goodbye.%s\r\n", green, reset)
 	os.Exit(0)
 }
