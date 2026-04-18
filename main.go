@@ -20,6 +20,7 @@ func main() {
 	var (
 		lanMode   = flag.Bool("lan", false, "use LAN mode (mDNS) instead of online relay")
 		serverURL = flag.String("server", network.DefaultRelayURL, "relay server WebSocket URL")
+		roomName  = flag.String("room", "default", "room name / password (shared with peers)")
 		nameFlag  = flag.String("name", "", "override saved name for this session")
 		ver       = flag.Bool("version", false, "print version and exit")
 	)
@@ -46,7 +47,7 @@ func main() {
 		mgr = network.NewManager(name)
 	} else {
 		fmt.Printf("\033[2m\033[32m  [mode] online · %s\033[0m\n\n", *serverURL)
-		mgr = network.NewOnlineManager(name, *serverURL)
+		mgr = network.NewOnlineManager(name, *serverURL, *roomName)
 	}
 
 	mgr.Start()

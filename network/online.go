@@ -2,43 +2,108 @@ package network
 
 import (
 	"context"
+	"crypto/ecdh"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/crypto/chacha20poly1305"
+	"golang.org/x/crypto/hkdf"
 )
 
 const DefaultRelayURL = "wss://porfavor-relay.relayporfavor.workers.dev"
 
+type onlinePeer struct {
+	dmKey []byte // per-pair ECDH key for DMs
+}
+
 type OnlineManager struct {
 	LocalName string
 
-	serverURL string
-	wsConn    *websocket.Conn
-	writeMu   sync.Mutex  // gorilla requires single concurrent writer
-	connMu    sync.RWMutex
+	serverURL string // full URL including room path
+	roomKey   []byte // 32-byte key derived from room password (group encryption)
+
+	privKey     *ecdh.PrivateKey
+	pubKeyBytes []byte
+
+	wsConn  *websocket.Conn
+	writeMu sync.Mutex
+	connMu  sync.RWMutex
 
 	incoming chan Envelope
-	peers    map[string]bool
+	peers    map[string]*onlinePeer
 	peersMu  sync.RWMutex
 
 	quit chan struct{}
 	once sync.Once
 }
 
-func NewOnlineManager(name, serverURL string) *OnlineManager {
+// NewOnlineManager creates a manager that connects to the relay.
+// roomName is used to derive both the room encryption key and the room path.
+// Defaults to "default" if empty.
+func NewOnlineManager(name, serverURL, roomName string) *OnlineManager {
 	if serverURL == "" {
 		serverURL = DefaultRelayURL
 	}
-	return &OnlineManager{
-		LocalName: name,
-		serverURL: serverURL,
-		incoming:  make(chan Envelope, 128),
-		peers:     make(map[string]bool),
-		quit:      make(chan struct{}),
+	if roomName == "" {
+		roomName = "default"
 	}
+
+	// Derive room path — hash of room name, used as WebSocket URL path
+	pathHash := sha256.Sum256([]byte("porfavor-path:" + roomName))
+	roomPath := hex.EncodeToString(pathHash[:16])
+
+	// Derive room key — used for group message encryption
+	roomKey := deriveRoomKey(roomName)
+
+	// Generate fresh X25519 keypair for this session
+	curve := ecdh.X25519()
+	priv, err := curve.GenerateKey(rand.Reader)
+	if err != nil {
+		panic("failed to generate ECDH key: " + err.Error())
+	}
+
+	return &OnlineManager{
+		LocalName:   name,
+		serverURL:   serverURL + "/room/" + roomPath,
+		roomKey:     roomKey,
+		privKey:     priv,
+		pubKeyBytes: priv.PublicKey().Bytes(),
+		incoming:    make(chan Envelope, 128),
+		peers:       make(map[string]*onlinePeer),
+		quit:        make(chan struct{}),
+	}
+}
+
+func deriveRoomKey(roomName string) []byte {
+	r := hkdf.New(sha256.New, []byte(roomName), []byte("porfavor-salt"), []byte("porfavor-room-v1"))
+	key := make([]byte, chacha20poly1305.KeySize)
+	_, _ = io.ReadFull(r, key)
+	return key
+}
+
+func deriveSharedKey(priv *ecdh.PrivateKey, peerPubBytes []byte) ([]byte, error) {
+	curve := ecdh.X25519()
+	peerPub, err := curve.NewPublicKey(peerPubBytes)
+	if err != nil {
+		return nil, err
+	}
+	secret, err := priv.ECDH(peerPub)
+	if err != nil {
+		return nil, err
+	}
+	r := hkdf.New(sha256.New, secret, nil, []byte("porfavor-dm-v1"))
+	key := make([]byte, chacha20poly1305.KeySize)
+	if _, err := io.ReadFull(r, key); err != nil {
+		return nil, err
+	}
+	return key, nil
 }
 
 func (m *OnlineManager) Messages() <-chan Envelope {
@@ -58,10 +123,10 @@ func (m *OnlineManager) connectLoop() {
 		default:
 		}
 
-		// Use Google DNS (8.8.8.8) directly — Termux resolv.conf often
-		// points to [::1]:53 which is broken. Also force IPv4 connections.
 		dialer := websocket.Dialer{
 			NetDial: func(network, addr string) (net.Conn, error) {
+				// Bypass broken system DNS (common on Termux), use Google DNS
+				// and force IPv4 (IPv6 unreachable on many mobile networks)
 				resolver := &net.Resolver{
 					PreferGo: true,
 					Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
@@ -76,7 +141,6 @@ func (m *OnlineManager) connectLoop() {
 				if err != nil {
 					return nil, err
 				}
-				// Prefer IPv4
 				for _, a := range addrs {
 					if net.ParseIP(a).To4() != nil {
 						return net.Dial("tcp4", net.JoinHostPort(a, port))
@@ -85,6 +149,7 @@ func (m *OnlineManager) connectLoop() {
 				return net.Dial("tcp4", net.JoinHostPort(addrs[0], port))
 			},
 		}
+
 		conn, _, err := dialer.Dial(m.serverURL, nil)
 		if err != nil {
 			m.sendError("relay unreachable — retrying in 5s: " + err.Error())
@@ -105,19 +170,23 @@ func (m *OnlineManager) connectLoop() {
 		}
 		first = false
 
-		// Announce ourselves
-		m.sendRaw(Envelope{Type: MsgJoin, From: m.LocalName, Body: m.LocalName})
+		// Announce ourselves with our public key for E2E key exchange
+		m.sendRaw(Envelope{
+			Type:   MsgJoin,
+			From:   m.LocalName,
+			Body:   m.LocalName,
+			PubKey: m.pubKeyBytes,
+		})
 
-		// Block until connection drops
 		m.readLoop(conn)
 
 		m.connMu.Lock()
 		m.wsConn = nil
 		m.connMu.Unlock()
 
-		// Clear peer list on disconnect
+		// Clear peer state on disconnect
 		m.peersMu.Lock()
-		m.peers = make(map[string]bool)
+		m.peers = make(map[string]*onlinePeer)
 		m.peersMu.Unlock()
 
 		select {
@@ -141,22 +210,45 @@ func (m *OnlineManager) readLoop(conn *websocket.Conn) {
 			continue
 		}
 
-		// Maintain local peer list
+		// Decrypt encrypted messages before pushing to UI
+		if len(env.Payload) > 0 && len(env.Nonce) > 0 {
+			key := m.decryptKey(env)
+			plain, err := decryptMsg(key, env.Nonce, env.Payload)
+			if err != nil {
+				// Wrong room key = wrong room — silently drop
+				continue
+			}
+			env.Body = string(plain)
+			env.Payload = nil
+			env.Nonce = nil
+		}
+
+		// Maintain peer state
 		switch env.Type {
 		case MsgJoin:
+			peer := &onlinePeer{}
+			if len(env.PubKey) > 0 {
+				if dmKey, err := deriveSharedKey(m.privKey, env.PubKey); err == nil {
+					peer.dmKey = dmKey
+				}
+			}
 			m.peersMu.Lock()
-			m.peers[env.From] = true
+			m.peers[env.From] = peer
 			m.peersMu.Unlock()
+
 		case MsgLeave:
 			m.peersMu.Lock()
 			delete(m.peers, env.From)
 			m.peersMu.Unlock()
+
 		case MsgNick:
 			m.peersMu.Lock()
-			delete(m.peers, env.From)
-			if env.Body != "" {
-				m.peers[env.Body] = true
+			peer := m.peers[env.From]
+			if peer == nil {
+				peer = &onlinePeer{}
 			}
+			delete(m.peers, env.From)
+			m.peers[env.Body] = peer
 			m.peersMu.Unlock()
 		}
 
@@ -164,14 +256,53 @@ func (m *OnlineManager) readLoop(conn *websocket.Conn) {
 	}
 }
 
+// decryptKey returns the right key for decrypting an envelope.
+// DMs use the per-pair ECDH key; everything else uses the room key.
+func (m *OnlineManager) decryptKey(env Envelope) []byte {
+	if env.Type == MsgDM {
+		m.peersMu.RLock()
+		peer := m.peers[env.From]
+		m.peersMu.RUnlock()
+		if peer != nil && peer.dmKey != nil {
+			return peer.dmKey
+		}
+	}
+	return m.roomKey
+}
+
 func (m *OnlineManager) Send(env Envelope) {
 	env.From = m.LocalName
+	if isEncrypted(env.Type) {
+		nonce, payload, err := encryptMsg(m.roomKey, []byte(env.Body))
+		if err == nil {
+			env.Nonce = nonce
+			env.Payload = payload
+			env.Body = ""
+		}
+	}
 	m.sendRaw(env)
 }
 
 func (m *OnlineManager) SendTo(name string, env Envelope) bool {
 	env.From = m.LocalName
 	env.To = name
+
+	if isEncrypted(env.Type) {
+		// Use per-pair DM key if available, fall back to room key
+		key := m.roomKey
+		m.peersMu.RLock()
+		peer := m.peers[name]
+		m.peersMu.RUnlock()
+		if peer != nil && peer.dmKey != nil {
+			key = peer.dmKey
+		}
+		nonce, payload, err := encryptMsg(key, []byte(env.Body))
+		if err == nil {
+			env.Nonce = nonce
+			env.Payload = payload
+			env.Body = ""
+		}
+	}
 	m.sendRaw(env)
 	return true
 }
@@ -181,15 +312,12 @@ func (m *OnlineManager) sendRaw(env Envelope) {
 	if err != nil {
 		return
 	}
-
 	m.connMu.RLock()
 	conn := m.wsConn
 	m.connMu.RUnlock()
-
 	if conn == nil {
 		return
 	}
-
 	m.writeMu.Lock()
 	_ = conn.WriteMessage(websocket.TextMessage, data)
 	m.writeMu.Unlock()
@@ -216,7 +344,8 @@ func (m *OnlineManager) Peers() []string {
 func (m *OnlineManager) HasPeer(name string) bool {
 	m.peersMu.RLock()
 	defer m.peersMu.RUnlock()
-	return m.peers[name]
+	_, ok := m.peers[name]
+	return ok
 }
 
 func (m *OnlineManager) UpdateName(newName string) {

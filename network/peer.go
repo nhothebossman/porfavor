@@ -44,6 +44,7 @@ type Envelope struct {
 	Body    string  `json:"b,omitempty"`
 	Nonce   []byte  `json:"n,omitempty"`
 	Payload []byte  `json:"p,omitempty"`
+	PubKey  []byte  `json:"pk,omitempty"` // X25519 pubkey, sent in MsgJoin for E2E
 }
 
 type Peer struct {
