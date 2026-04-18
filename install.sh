@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-REPO="nhoblogg/porfavor"
+REPO="nhothebossman/porfavor"
 BIN="porfavor"
 VERSION="latest"
 
