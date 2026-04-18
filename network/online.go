@@ -1,6 +1,7 @@
 package network
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"sync"
@@ -57,10 +58,31 @@ func (m *OnlineManager) connectLoop() {
 		default:
 		}
 
-		// Force IPv4 — IPv6 is unreachable on many mobile/Termux setups
+		// Use Google DNS (8.8.8.8) directly — Termux resolv.conf often
+		// points to [::1]:53 which is broken. Also force IPv4 connections.
 		dialer := websocket.Dialer{
 			NetDial: func(network, addr string) (net.Conn, error) {
-				return net.Dial("tcp4", addr)
+				resolver := &net.Resolver{
+					PreferGo: true,
+					Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+						return net.Dial("udp", "8.8.8.8:53")
+					},
+				}
+				host, port, err := net.SplitHostPort(addr)
+				if err != nil {
+					return nil, err
+				}
+				addrs, err := resolver.LookupHost(context.Background(), host)
+				if err != nil {
+					return nil, err
+				}
+				// Prefer IPv4
+				for _, a := range addrs {
+					if net.ParseIP(a).To4() != nil {
+						return net.Dial("tcp4", net.JoinHostPort(a, port))
+					}
+				}
+				return net.Dial("tcp4", net.JoinHostPort(addrs[0], port))
 			},
 		}
 		conn, _, err := dialer.Dial(m.serverURL, nil)
