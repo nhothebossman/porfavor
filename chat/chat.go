@@ -32,6 +32,7 @@ type Chat struct {
 	typing      bool
 	typingTimer *time.Timer
 	typingFrom  string
+	dmTarget    string // non-empty = we're in a DM session with this peer
 	mu          sync.Mutex
 	oldState    *term.State
 	rawMode     bool
@@ -97,7 +98,12 @@ func (c *Chat) receiveLoop() {
 			if c.typingFrom == env.From {
 				c.typingFrom = ""
 			}
-			c.sysf("%s left the chat", env.From)
+			if c.dmTarget == env.From {
+				c.dmTarget = ""
+				c.sysf("%s left · DM session closed", env.From)
+			} else {
+				c.sysf("%s left the chat", env.From)
+			}
 
 		case network.MsgChat:
 			if c.typingFrom == env.From {
@@ -204,9 +210,21 @@ func (c *Chat) dispatch(line string) {
 		return
 	}
 	c.mu.Lock()
-	c.printMsg(c.name, line, true)
+	target := c.dmTarget
 	c.mu.Unlock()
-	c.mgr.Send(network.Envelope{Type: network.MsgChat, Body: line})
+
+	if target != "" {
+		// In a DM session — send as DM
+		c.mu.Lock()
+		fmt.Printf("%s[DM → %s] %s%s\r\n", brightGreen, target, line, reset)
+		c.mu.Unlock()
+		c.mgr.SendTo(target, network.Envelope{Type: network.MsgDM, To: target, Body: line})
+	} else {
+		c.mu.Lock()
+		c.printMsg(c.name, line, true)
+		c.mu.Unlock()
+		c.mgr.Send(network.Envelope{Type: network.MsgChat, Body: line})
+	}
 }
 
 func (c *Chat) handleCommand(line string) {
@@ -223,7 +241,9 @@ func (c *Chat) handleCommand(line string) {
 		fmt.Print("  /help                  — list commands\r\n")
 		fmt.Print("  /peers                 — list who is online\r\n")
 		fmt.Print("  /connect <ip>          — connect directly by IP (mDNS fallback)\r\n")
-		fmt.Print("  /dm <name> <message>   — private message\r\n")
+		fmt.Print("  /dm <name>             — open a private DM session\r\n")
+		fmt.Print("  /dm <name> <message>   — send a one-off private message\r\n")
+		fmt.Print("  /back                  — return to group chat from DM session\r\n")
 		fmt.Print("  /nick <newname>        — change your name\r\n")
 		fmt.Print("  /me <action>           — action message\r\n")
 		fmt.Print("  /clear                 — clear screen\r\n")
@@ -275,14 +295,13 @@ func (c *Chat) handleCommand(line string) {
 		}()
 
 	case "/dm":
-		if len(parts) < 3 {
+		if len(parts) < 2 {
 			c.mu.Lock()
-			c.sysf("usage: /dm <name> <message>")
+			c.sysf("usage: /dm <name>  or  /dm <name> <message>")
 			c.mu.Unlock()
 			return
 		}
 		target := parts[1]
-		msg := strings.Join(parts[2:], " ")
 
 		if !c.mgr.HasPeer(target) {
 			c.mu.Lock()
@@ -291,10 +310,31 @@ func (c *Chat) handleCommand(line string) {
 			return
 		}
 
+		if len(parts) >= 3 {
+			// One-liner DM: /dm <name> <message>
+			msg := strings.Join(parts[2:], " ")
+			c.mu.Lock()
+			c.dmTarget = target
+			fmt.Printf("%s[DM → %s] %s%s\r\n", brightGreen, target, msg, reset)
+			c.mu.Unlock()
+			c.mgr.SendTo(target, network.Envelope{Type: network.MsgDM, To: target, Body: msg})
+		} else {
+			// Session mode: /dm <name> — enter DM session
+			c.mu.Lock()
+			c.dmTarget = target
+			c.sysf("DM session with %s · type normally to chat · /back to return", target)
+			c.mu.Unlock()
+		}
+
+	case "/back":
 		c.mu.Lock()
-		fmt.Printf("%s[DM → %s] %s%s\r\n", brightGreen, target, msg, reset)
+		if c.dmTarget == "" {
+			c.sysf("not in a DM session")
+		} else {
+			c.sysf("back to group chat (was DM with %s)", c.dmTarget)
+			c.dmTarget = ""
+		}
 		c.mu.Unlock()
-		c.mgr.SendTo(target, network.Envelope{Type: network.MsgDM, To: target, Body: msg})
 
 	case "/nick":
 		if len(parts) < 2 {
@@ -381,13 +421,21 @@ func (c *Chat) sysf(format string, args ...any) {
 func (c *Chat) printPrompt() {
 	ts := time.Now().Format("15:04:05")
 	buf := string(c.inputBuf)
-	fmt.Printf("%s%s [%s]  %s█%s", green, ts, c.name, buf, reset)
+	if c.dmTarget != "" {
+		fmt.Printf("%s%s [%s → %s]  %s█%s", brightGreen, ts, c.name, c.dmTarget, buf, reset)
+	} else {
+		fmt.Printf("%s%s [%s]  %s█%s", green, ts, c.name, buf, reset)
+	}
 }
 
 func (c *Chat) redrawInput() {
 	ts := time.Now().Format("15:04:05")
 	buf := string(c.inputBuf)
-	fmt.Printf("%s%s%s [%s]  %s█%s", clearLine, green, ts, c.name, buf, reset)
+	if c.dmTarget != "" {
+		fmt.Printf("%s%s%s [%s → %s]  %s█%s", clearLine, brightGreen, ts, c.name, c.dmTarget, buf, reset)
+	} else {
+		fmt.Printf("%s%s%s [%s]  %s█%s", clearLine, green, ts, c.name, buf, reset)
+	}
 }
 
 func (c *Chat) clearInput() {
