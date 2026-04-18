@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,32 +17,39 @@ import (
 var version = "dev"
 
 func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-version") {
+	var (
+		lanMode   = flag.Bool("lan", false, "use LAN mode (mDNS) instead of online relay")
+		serverURL = flag.String("server", network.DefaultRelayURL, "relay server WebSocket URL")
+		nameFlag  = flag.String("name", "", "override saved name for this session")
+		ver       = flag.Bool("version", false, "print version and exit")
+	)
+	flag.Parse()
+
+	if *ver {
 		fmt.Println("porfavor " + version)
 		return
 	}
 
 	logo.PrintLogo()
 
-	// Allow overriding name without touching saved config
-	var name string
-	for i, arg := range os.Args[1:] {
-		if arg == "--name" || arg == "-name" {
-			if i+2 < len(os.Args) {
-				name = strings.ToUpper(os.Args[i+2])
-			}
-			break
-		}
-	}
-	if name == "" {
-		name = loadOrPromptName()
-	} else {
+	name := *nameFlag
+	if name != "" {
+		name = strings.ToUpper(name)
 		fmt.Printf("\033[32m  Running as %s.\033[0m\n\n", name)
+	} else {
+		name = loadOrPromptName()
 	}
 
-	mgr := network.NewManager(name)
-	mgr.Start()
+	var mgr network.Backend
+	if *lanMode {
+		fmt.Printf("\033[2m\033[32m  [mode] LAN · mDNS discovery\033[0m\n\n")
+		mgr = network.NewManager(name)
+	} else {
+		fmt.Printf("\033[2m\033[32m  [mode] online · %s\033[0m\n\n", *serverURL)
+		mgr = network.NewOnlineManager(name, *serverURL)
+	}
 
+	mgr.Start()
 	chat.New(mgr, name).Run()
 }
 
@@ -57,7 +65,6 @@ func loadOrPromptName() string {
 		}
 	}
 
-	// First run — prompt for name
 	fmt.Print("\033[32m  What's your name? → \033[0m")
 	reader := bufio.NewReader(os.Stdin)
 	input, _ := reader.ReadString('\n')
@@ -67,9 +74,7 @@ func loadOrPromptName() string {
 		name = "anon"
 	}
 
-	// Uppercase the name for display
 	name = strings.ToUpper(name)
-
 	saveName(configPath, name)
 	fmt.Println()
 	return name

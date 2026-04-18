@@ -26,7 +26,7 @@ const (
 )
 
 type Chat struct {
-	mgr         *network.Manager
+	mgr         network.Backend
 	name        string
 	inputBuf    []rune
 	typing      bool
@@ -37,7 +37,7 @@ type Chat struct {
 	rawMode     bool
 }
 
-func New(mgr *network.Manager, name string) *Chat {
+func New(mgr network.Backend, name string) *Chat {
 	return &Chat{mgr: mgr, name: name}
 }
 
@@ -83,7 +83,7 @@ func (c *Chat) bootSequence() {
 }
 
 func (c *Chat) receiveLoop() {
-	for env := range c.mgr.Incoming {
+	for env := range c.mgr.Messages() {
 		c.mu.Lock()
 		c.clearInput()
 
@@ -244,6 +244,16 @@ func (c *Chat) handleCommand(line string) {
 		c.mu.Unlock()
 
 	case "/connect":
+		type connector interface {
+			ConnectToAddr(addr string) error
+		}
+		conn, isLAN := c.mgr.(connector)
+		if !isLAN {
+			c.mu.Lock()
+			c.sysf("/connect is only available in LAN mode (--lan)")
+			c.mu.Unlock()
+			return
+		}
 		if len(parts) < 2 {
 			c.mu.Lock()
 			c.sysf("usage: /connect <ip>  or  /connect <ip:port>")
@@ -255,7 +265,7 @@ func (c *Chat) handleCommand(line string) {
 		c.sysf("connecting to %s...", addr)
 		c.mu.Unlock()
 		go func() {
-			if err := c.mgr.ConnectToAddr(addr); err != nil {
+			if err := conn.ConnectToAddr(addr); err != nil {
 				c.mu.Lock()
 				c.clearInput()
 				c.sysf("connect failed: %s", err.Error())

@@ -427,6 +427,10 @@ func (m *Manager) SendTypingStop() {
 	m.Send(Envelope{Type: MsgTyping, Body: "0"})
 }
 
+func (m *Manager) Messages() <-chan Envelope {
+	return m.Incoming
+}
+
 func (m *Manager) Peers() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
