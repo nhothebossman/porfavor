@@ -2,7 +2,6 @@ package logo
 
 import (
 	"fmt"
-	"math/rand"
 	"time"
 )
 
@@ -11,29 +10,21 @@ const (
 	reset = "\033[0m"
 )
 
-const style1 = `██████╗  ██████╗ ██████╗     ███████╗ █████╗ ██╗   ██╗ ██████╗ ██████╗
+const logo = `██████╗  ██████╗ ██████╗     ███████╗ █████╗ ██╗   ██╗ ██████╗ ██████╗
 ██╔══██╗██╔═══██╗██╔══██╗    ██╔════╝██╔══██╗██║   ██║██╔═══██╗██╔══██╗
 ██████╔╝██║   ██║██████╔╝    █████╗  ███████║██║   ██║██║   ██║██████╔╝
 ██╔═══╝ ██║   ██║██╔══██╗    ██╔══╝  ██╔══██║╚██╗ ██╔╝██║   ██║██╔══██╗
 ██║     ╚██████╔╝██║  ██║    ██║     ██║  ██║ ╚████╔╝ ╚██████╔╝██║  ██║
 ╚═╝      ╚═════╝ ╚═╝  ╚═╝    ╚═╝     ╚═╝  ╚═╝  ╚═══╝   ╚═════╝ ╚═╝  ╚═╝`
 
-const style7 = ` ___  ___  ____     ____  __   _  _  ___  ____
-(  ,\(  _)(  _ \   (  __)/  \ / )( \(   \(  _ \
- ) _/ ) _)  )   /   ) _)(  O )\ \/ / ) ) )) __/
-(_)  (___)(__)\_)  (__)  \__/  \__/ (___/(__)  `
-
 const footer = `════════════════════════════════════════════
- p2p · lan only · encrypted · no trace
+ encrypted · ephemeral · no accounts
  type /help for commands
 ════════════════════════════════════════════`
 
 func PrintLogo() {
-	logos := []string{style1, style7}
-	chosen := logos[rand.Intn(len(logos))]
-
 	fmt.Print(green)
-	fmt.Println(chosen)
+	fmt.Println(logo)
 	time.Sleep(60 * time.Millisecond)
 	fmt.Println(footer)
 	fmt.Print(reset)

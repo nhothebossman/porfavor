@@ -35,7 +35,6 @@ func main() {
 
 	name := *nameFlag
 	if name != "" {
-		name = strings.ToUpper(name)
 		fmt.Printf("\033[32m  Running as %s.\033[0m\n\n", name)
 	} else {
 		name = loadOrPromptName()
@@ -75,7 +74,6 @@ func loadOrPromptName() string {
 		name = "anon"
 	}
 
-	name = strings.ToUpper(name)
 	saveName(configPath, name)
 	fmt.Println()
 	return name

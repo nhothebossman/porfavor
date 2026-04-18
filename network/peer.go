@@ -31,6 +31,7 @@ const (
 	MsgDM      MsgType = "dm"
 	MsgOneTime MsgType = "onetime"
 	MsgBurn    MsgType = "burn"
+	MsgTopic   MsgType = "topic"
 	MsgTyping  MsgType = "typing"
 	MsgJoin    MsgType = "join"
 	MsgLeave   MsgType = "leave"
@@ -546,7 +547,7 @@ func (m *Manager) sendError(msg string) {
 }
 
 func isEncrypted(t MsgType) bool {
-	return t == MsgChat || t == MsgDM || t == MsgMe || t == MsgOneTime || t == MsgBurn
+	return t == MsgChat || t == MsgDM || t == MsgMe || t == MsgOneTime || t == MsgBurn || t == MsgTopic
 }
 
 func writeFrame(conn net.Conn, data []byte) error {

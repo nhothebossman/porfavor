@@ -26,6 +26,8 @@ const (
 	clearScreen = "\033[2J\033[H"
 )
 
+const historyMax = 50
+
 type Chat struct {
 	mgr         network.Backend
 	name        string
@@ -35,9 +37,21 @@ type Chat struct {
 	typingFrom  string
 	dmTarget    string // non-empty = we're in a DM session with this peer
 	awayMsg     string // non-empty = auto-reply this to incoming DMs
-	mu          sync.Mutex
-	oldState    *term.State
-	rawMode     bool
+
+	// history — ring buffer of sent lines, navigated with ↑/↓
+	history    []string
+	histIdx    int // -1 = not navigating; 0 = most recent
+	histDraft  string // saved draft while navigating history
+
+	// tab completion
+	tabMatches []string
+	tabIdx     int
+
+	currentTopic string // room topic, shown on join and with /topic
+
+	mu       sync.Mutex
+	oldState *term.State
+	rawMode  bool
 }
 
 func New(mgr network.Backend, name string) *Chat {
@@ -111,7 +125,8 @@ func (c *Chat) receiveLoop() {
 			if c.typingFrom == env.From {
 				c.typingFrom = ""
 			}
-			c.printMsg(env.From, env.Body, false)
+			mentioned := strings.Contains(strings.ToLower(env.Body), strings.ToLower(c.name))
+			c.printMsg(env.From, env.Body, false, mentioned)
 
 		case network.MsgMe:
 			if c.typingFrom == env.From {
@@ -152,6 +167,15 @@ func (c *Chat) receiveLoop() {
 				c.typingFrom = ""
 			}
 
+		case network.MsgTopic:
+			c.currentTopic = env.Body
+			if env.From == "" {
+				// Delivered by relay on join — show as room context
+				c.sysf("topic: %s", env.Body)
+			} else {
+				c.sysf("%s set the topic: %s", env.From, env.Body)
+			}
+
 		case network.MsgNick:
 			c.sysf("%s is now known as %s", env.From, env.Body)
 
@@ -171,6 +195,8 @@ func (c *Chat) inputLoop() {
 	}
 
 	reader := bufio.NewReader(os.Stdin)
+	c.histIdx = -1
+
 	for {
 		r, _, err := reader.ReadRune()
 		if err != nil {
@@ -183,11 +209,15 @@ func (c *Chat) inputLoop() {
 		case '\r', '\n':
 			line := strings.TrimSpace(string(c.inputBuf))
 			c.inputBuf = c.inputBuf[:0]
+			c.histIdx = -1
+			c.histDraft = ""
+			c.tabMatches = nil
 			c.stopTyping()
 			fmt.Print(clearLine)
 			c.mu.Unlock()
 
 			if line != "" {
+				c.pushHistory(line)
 				c.dispatch(line)
 			}
 
@@ -195,11 +225,16 @@ func (c *Chat) inputLoop() {
 			c.printPrompt()
 			c.mu.Unlock()
 
-		case 127, '\b':
+		case 127, '\b': // backspace
 			if len(c.inputBuf) > 0 {
 				c.inputBuf = c.inputBuf[:len(c.inputBuf)-1]
 			}
+			c.tabMatches = nil
 			c.redrawInput()
+			c.mu.Unlock()
+
+		case '\t': // tab completion
+			c.doTabComplete()
 			c.mu.Unlock()
 
 		case 3, 4: // Ctrl+C, Ctrl+D
@@ -207,15 +242,112 @@ func (c *Chat) inputLoop() {
 			c.quit()
 			return
 
+		case '\x1b': // ESC — start of an escape sequence
+			c.mu.Unlock()
+			// Read the rest of the sequence without holding the lock
+			b1, err1 := reader.ReadByte()
+			b2, err2 := reader.ReadByte()
+			if err1 != nil || err2 != nil {
+				continue
+			}
+			c.mu.Lock()
+			if b1 == '[' {
+				switch b2 {
+				case 'A': // up arrow — older history
+					c.historyUp()
+				case 'B': // down arrow — newer history
+					c.historyDown()
+				}
+			}
+			c.mu.Unlock()
+
 		default:
 			if utf8.ValidRune(r) && r >= 32 {
 				c.inputBuf = append(c.inputBuf, r)
+				c.tabMatches = nil
 				c.startTyping()
 				c.redrawInput()
 			}
 			c.mu.Unlock()
 		}
 	}
+}
+
+// pushHistory adds a line to the history ring buffer.
+// Must be called without the lock held.
+func (c *Chat) pushHistory(line string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// Don't duplicate consecutive identical entries
+	if len(c.history) > 0 && c.history[0] == line {
+		return
+	}
+	c.history = append([]string{line}, c.history...)
+	if len(c.history) > historyMax {
+		c.history = c.history[:historyMax]
+	}
+}
+
+// historyUp moves back in history. Must be called with c.mu held.
+func (c *Chat) historyUp() {
+	if len(c.history) == 0 {
+		return
+	}
+	if c.histIdx == -1 {
+		// Save whatever is currently typed
+		c.histDraft = string(c.inputBuf)
+	}
+	next := c.histIdx + 1
+	if next >= len(c.history) {
+		return
+	}
+	c.histIdx = next
+	c.inputBuf = []rune(c.history[c.histIdx])
+	c.redrawInput()
+}
+
+// historyDown moves forward in history. Must be called with c.mu held.
+func (c *Chat) historyDown() {
+	if c.histIdx == -1 {
+		return
+	}
+	c.histIdx--
+	if c.histIdx == -1 {
+		c.inputBuf = []rune(c.histDraft)
+	} else {
+		c.inputBuf = []rune(c.history[c.histIdx])
+	}
+	c.redrawInput()
+}
+
+var allCommands = []string{
+	"/help", "/peers", "/dm", "/back", "/onetime", "/burn", "/away",
+	"/room", "/invite", "/nick", "/me", "/connect", "/clear", "/nuke", "/quit",
+}
+
+// doTabComplete cycles through commands matching the current input prefix.
+// Must be called with c.mu held.
+func (c *Chat) doTabComplete() {
+	buf := string(c.inputBuf)
+	if !strings.HasPrefix(buf, "/") {
+		return
+	}
+	// Build match list if we're starting a new completion
+	if len(c.tabMatches) == 0 {
+		c.tabIdx = 0
+		for _, cmd := range allCommands {
+			if strings.HasPrefix(cmd, buf) && cmd != buf {
+				c.tabMatches = append(c.tabMatches, cmd)
+			}
+		}
+		if len(c.tabMatches) == 0 {
+			return
+		}
+	} else {
+		c.tabIdx = (c.tabIdx + 1) % len(c.tabMatches)
+	}
+	c.inputBuf = []rune(c.tabMatches[c.tabIdx] + " ")
+	c.redrawInput()
 }
 
 func (c *Chat) inputLoopBuffered() {
@@ -245,7 +377,7 @@ func (c *Chat) dispatch(line string) {
 		c.mgr.SendTo(target, network.Envelope{Type: network.MsgDM, To: target, Body: line})
 	} else {
 		c.mu.Lock()
-		c.printMsg(c.name, line, true)
+		c.printMsg(c.name, line, true, false)
 		c.mu.Unlock()
 		c.mgr.Send(network.Envelope{Type: network.MsgChat, Body: line})
 	}
@@ -261,25 +393,11 @@ func (c *Chat) handleCommand(line string) {
 	switch cmd {
 	case "/help":
 		c.mu.Lock()
-		fmt.Printf("%s", green)
-		fmt.Print("  /help                     — list commands\r\n")
-		fmt.Print("  /peers                    — list who is online\r\n")
-		fmt.Print("  /dm <name>                — open a private DM session\r\n")
-		fmt.Print("  /dm <name> <message>      — send a one-off private message\r\n")
-		fmt.Print("  /back                     — return to group chat from DM session\r\n")
-		fmt.Print("  /onetime <name> \"msg\"     — burn-after-reading (held until they connect)\r\n")
-		fmt.Print("  /burn <secs> \"msg\"        — self-destructing room message\r\n")
-		fmt.Print("  /away \"message\"           — set away status (auto-replies to DMs)\r\n")
-		fmt.Print("  /away                     — clear away status\r\n")
-		fmt.Print("  /room <name>              — switch to a different room (online only)\r\n")
-		fmt.Print("  /invite                   — print invite command for this room (online only)\r\n")
-		fmt.Print("  /nick <newname>           — change your name\r\n")
-		fmt.Print("  /me <action>              — action message\r\n")
-		fmt.Print("  /connect <ip>             — connect directly by IP (LAN only)\r\n")
-		fmt.Print("  /clear                    — clear screen\r\n")
-		fmt.Print("  /nuke                     — disconnect and exit immediately\r\n")
-		fmt.Print("  /quit                     — exit\r\n")
-		fmt.Printf("%s", reset)
+		if len(parts) >= 2 {
+			c.printCommandHelp(parts[1])
+		} else {
+			c.printHelp()
+		}
 		c.mu.Unlock()
 
 	case "/peers":
@@ -374,7 +492,7 @@ func (c *Chat) handleCommand(line string) {
 			c.mu.Unlock()
 			return
 		}
-		newName := strings.ToUpper(parts[1])
+		newName := parts[1]
 		c.mu.Lock()
 		old := c.name
 		c.name = newName
@@ -524,6 +642,41 @@ func (c *Chat) handleCommand(line string) {
 		fmt.Printf("%s  invite: porfavor --room %s%s\r\n", brightGreen, r.RoomName(), reset)
 		c.mu.Unlock()
 
+	case "/topic":
+		if len(parts) < 2 {
+			// Show current topic
+			c.mu.Lock()
+			if c.currentTopic == "" {
+				c.sysf("no topic set · use /topic \"your topic\"")
+			} else {
+				c.sysf("topic: %s", c.currentTopic)
+			}
+			c.mu.Unlock()
+			return
+		}
+		if strings.ToLower(parts[1]) == "clear" {
+			c.mu.Lock()
+			c.currentTopic = ""
+			c.sysf("topic cleared")
+			c.mu.Unlock()
+			c.mgr.Send(network.Envelope{Type: network.MsgTopic, Body: ""})
+			return
+		}
+		q1 := strings.Index(line, `"`)
+		q2 := strings.LastIndex(line, `"`)
+		if q1 == -1 || q1 == q2 {
+			c.mu.Lock()
+			c.sysf(`usage: /topic "your topic"  or  /topic clear`)
+			c.mu.Unlock()
+			return
+		}
+		topic := line[q1+1 : q2]
+		c.mu.Lock()
+		c.currentTopic = topic
+		c.sysf("topic set: %s", topic)
+		c.mu.Unlock()
+		c.mgr.Send(network.Envelope{Type: network.MsgTopic, Body: topic})
+
 	case "/nuke":
 		c.restore()
 		c.mgr.Shutdown()
@@ -567,11 +720,15 @@ func (c *Chat) stopTyping() {
 	}
 }
 
-func (c *Chat) printMsg(name, body string, isSelf bool) {
+func (c *Chat) printMsg(name, body string, isSelf, mentioned bool) {
 	ts := time.Now().Format("15:04:05")
-	if isSelf {
+	switch {
+	case isSelf:
 		fmt.Printf("%s%s [%s]  %s%s\r\n", brightGreen, ts, name, body, reset)
-	} else {
+	case mentioned:
+		fmt.Printf("%s%s [%s]  ◆ %s%s\r\n", brightGreen, ts, name, body, reset)
+		fmt.Print("\a") // terminal bell
+	default:
 		fmt.Printf("%s%s [%s]  %s%s\r\n", green, ts, name, body, reset)
 	}
 }
@@ -630,4 +787,155 @@ func (c *Chat) quit() {
 	time.Sleep(150 * time.Millisecond)
 	fmt.Printf("\r\n%s[sys] goodbye.%s\r\n", green, reset)
 	os.Exit(0)
+}
+
+// printHelp prints the full categorised help. Must be called with c.mu held.
+func (c *Chat) printHelp() {
+	g, d, r := green, dim+green, reset
+	fmt.Printf("%s\r\n", g)
+	fmt.Printf("  ── Messaging ───────────────────────────────────%s\r\n", r)
+	fmt.Printf("%s  /me <action>              %s* YOU action  (e.g. /me waves)%s\r\n", g, d, r)
+	fmt.Printf("%s  /nick <name>              %schange your display name%s\r\n", g, d, r)
+	fmt.Printf("%s\r\n", g)
+	fmt.Printf("  ── Private ─────────────────────────────────────%s\r\n", r)
+	fmt.Printf("%s  /dm <name>                %sopen a DM session (type normally to chat)%s\r\n", g, d, r)
+	fmt.Printf("%s  /dm <name> <msg>          %ssend a one-off DM%s\r\n", g, d, r)
+	fmt.Printf("%s  /back                     %sreturn to group chat from a DM session%s\r\n", g, d, r)
+	fmt.Printf("%s  /onetime <name> \"msg\"     %sburn-after-reading · held until they connect%s\r\n", g, d, r)
+	fmt.Printf("%s  /burn <secs> \"msg\"        %sself-destructs for everyone after N seconds%s\r\n", g, d, r)
+	fmt.Printf("%s  /away \"msg\"               %sauto-reply to DMs · prompt shows [away]%s\r\n", g, d, r)
+	fmt.Printf("%s  /away                     %sclear away status%s\r\n", g, d, r)
+	fmt.Printf("%s\r\n", g)
+	fmt.Printf("  ── Room ────────────────────────────────────────%s\r\n", r)
+	fmt.Printf("%s  /peers                    %slist who is online%s\r\n", g, d, r)
+	fmt.Printf("%s  /room <name>              %sswitch rooms mid-session (online only)%s\r\n", g, d, r)
+	fmt.Printf("%s  /invite                   %sprint the join command for this room%s\r\n", g, d, r)
+	fmt.Printf("%s  /connect <ip>             %smanual IP connect (LAN mode only)%s\r\n", g, d, r)
+	fmt.Printf("%s\r\n", g)
+	fmt.Printf("  ── Navigation ──────────────────────────────────%s\r\n", r)
+	fmt.Printf("%s  ↑ / ↓                     %sscroll through message history%s\r\n", g, d, r)
+	fmt.Printf("%s  Tab                       %sautocomplete commands%s\r\n", g, d, r)
+	fmt.Printf("%s\r\n", g)
+	fmt.Printf("  ── Utility ─────────────────────────────────────%s\r\n", r)
+	fmt.Printf("%s  /clear                    %sclear the screen%s\r\n", g, d, r)
+	fmt.Printf("%s  /nuke                     %sdisconnect and vanish immediately%s\r\n", g, d, r)
+	fmt.Printf("%s  /quit                     %sexit gracefully%s\r\n", g, d, r)
+	fmt.Printf("%s\r\n", g)
+	fmt.Printf("  %stip: /help <command> for details    e.g. /help onetime%s\r\n", d, r)
+	fmt.Printf("\r\n")
+}
+
+// printCommandHelp prints detailed help for a single command. Must be called with c.mu held.
+func (c *Chat) printCommandHelp(cmd string) {
+	g, d, r := green, dim+green, reset
+	cmd = strings.TrimPrefix(strings.ToLower(cmd), "/")
+
+	type entry struct{ usage, desc, example string }
+	help := map[string]entry{
+		"dm": {
+			"/dm <name>  or  /dm <name> <message>",
+			"Open a private encrypted conversation.\n" +
+				"  /dm JAY          — enters a DM session, prompt becomes [YOU → JAY]\n" +
+				"  /dm JAY hey      — sends a one-off DM without entering session mode\n" +
+				"  Use /back to return to group chat.",
+			"/dm JAY\n  /dm JAY are you around?",
+		},
+		"onetime": {
+			`/onetime <name> "message"`,
+			"Burn-after-reading message.\n" +
+				"  Delivered exactly once, then deleted from the relay forever.\n" +
+				"  If the recipient is offline, the message waits (encrypted) until they connect.\n" +
+				"  The relay never sees the plaintext.",
+			`/onetime MARK "meet at the usual place"`,
+		},
+		"burn": {
+			`/burn <seconds> "message"`,
+			"Self-destructing room message.\n" +
+				"  Everyone in the room sees it with a countdown label.\n" +
+				"  After N seconds a burn notice replaces it. Range: 1–300 seconds.",
+			`/burn 30 "this message expires in 30 seconds"`,
+		},
+		"away": {
+			`/away "message"  or  /away`,
+			"Set an away status.\n" +
+				"  Anyone who DMs you gets an automatic reply with your message.\n" +
+				"  Your prompt shows [away] while active.\n" +
+				"  /away with no argument clears the status.",
+			`/away "on a call, back in 20"\n  /away`,
+		},
+		"room": {
+			"/room <name>",
+			"Switch rooms without restarting.\n" +
+				"  Sends a leave to the current room, derives a fresh encryption key,\n" +
+				"  and reconnects to the new room. Online mode only.\n" +
+				"  Your DM session is cleared on switch.",
+			"/room secretproject",
+		},
+		"invite": {
+			"/invite",
+			"Print the command someone else needs to join your current room.\n" +
+				"  Copy and share it however you like — Signal, IRL, email.\n" +
+				"  Online mode only.",
+			"/invite  →  porfavor --room fridaynight",
+		},
+		"nuke": {
+			"/nuke",
+			"Panic exit.\n" +
+				"  Disconnects immediately, clears the screen, exits.\n" +
+				"  No goodbye message. No trace in the terminal.",
+			"/nuke",
+		},
+		"nick": {
+			"/nick <newname>",
+			"Change your display name.\n" +
+				"  Broadcasts the change to everyone in the room.\n" +
+				"  Name is automatically uppercased.",
+			"/nick SHADOW",
+		},
+		"me": {
+			"/me <action>",
+			"Send an action message in third person.\n" +
+				"  Shows as:  * NAME action\n" +
+				"  Classic IRC-style emote.",
+			"/me slaps MARK with a large trout",
+		},
+		"peers": {
+			"/peers",
+			"List everyone currently online in your room.",
+			"/peers",
+		},
+		"back": {
+			"/back",
+			"Return to group chat from a DM session.\n" +
+				"  Does not affect away status — use /away to clear that.",
+			"/back",
+		},
+		"connect": {
+			"/connect <ip>  or  /connect <ip:port>",
+			"Manually connect to a peer by IP address.\n" +
+				"  LAN mode only. Use when mDNS discovery is blocked.\n" +
+				"  Default port is 47200.",
+			"/connect 192.168.1.42",
+		},
+		"clear": {"/clear", "Clear the terminal screen.", "/clear"},
+		"quit":  {"/quit", "Exit gracefully. Sends a leave notice to peers.", "/quit"},
+	}
+
+	e, ok := help[cmd]
+	if !ok {
+		c.sysf("no help for '%s' — try /help for the full list", cmd)
+		return
+	}
+	fmt.Printf("%s\r\n", g)
+	fmt.Printf("  %s%s%s\r\n", g, e.usage, r)
+	fmt.Printf("\r\n")
+	for _, line := range strings.Split(e.desc, "\n") {
+		fmt.Printf("  %s%s%s\r\n", d, line, r)
+	}
+	fmt.Printf("\r\n")
+	fmt.Printf("  %sexample:%s\r\n", d, r)
+	for _, line := range strings.Split(e.example, "\n") {
+		fmt.Printf("  %s  %s%s\r\n", g, line, r)
+	}
+	fmt.Printf("\r\n")
 }
