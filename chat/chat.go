@@ -27,6 +27,13 @@ const (
 )
 
 const historyMax = 50
+const dmHistoryMax = 5
+
+type dmMessage struct {
+	from string
+	body string
+	ts   time.Time
+}
 
 type Chat struct {
 	mgr         network.Backend
@@ -38,10 +45,13 @@ type Chat struct {
 	dmTarget    string // non-empty = we're in a DM session with this peer
 	awayMsg     string // non-empty = auto-reply this to incoming DMs
 
+	// per-peer DM history (in-memory, current session only)
+	dmHistory map[string][]dmMessage
+
 	// history — ring buffer of sent lines, navigated with ↑/↓
-	history    []string
-	histIdx    int // -1 = not navigating; 0 = most recent
-	histDraft  string // saved draft while navigating history
+	history   []string
+	histIdx   int    // -1 = not navigating; 0 = most recent
+	histDraft string // saved draft while navigating history
 
 	// tab completion
 	tabMatches []string
@@ -55,7 +65,11 @@ type Chat struct {
 }
 
 func New(mgr network.Backend, name string) *Chat {
-	return &Chat{mgr: mgr, name: name}
+	return &Chat{
+		mgr:       mgr,
+		name:      name,
+		dmHistory: make(map[string][]dmMessage),
+	}
 }
 
 func (c *Chat) Run() {
@@ -136,6 +150,7 @@ func (c *Chat) receiveLoop() {
 
 		case network.MsgDM:
 			fmt.Printf("%s[DM from %s] %s%s\r\n", brightGreen, env.From, env.Body, reset)
+			c.appendDMHistory(env.From, env.From, env.Body)
 			if c.awayMsg != "" {
 				from := env.From
 				reply := c.awayMsg
@@ -373,6 +388,7 @@ func (c *Chat) dispatch(line string) {
 		// In a DM session — send as DM
 		c.mu.Lock()
 		fmt.Printf("%s[DM → %s] %s%s\r\n", brightGreen, target, line, reset)
+		c.appendDMHistory(target, c.name, line)
 		c.mu.Unlock()
 		c.mgr.SendTo(target, network.Envelope{Type: network.MsgDM, To: target, Body: line})
 	} else {
@@ -446,7 +462,13 @@ func (c *Chat) handleCommand(line string) {
 	case "/dm":
 		if len(parts) < 2 {
 			c.mu.Lock()
-			c.sysf("usage: /dm <name>  or  /dm <name> <message>")
+			if c.dmTarget != "" {
+				// Already in a session — /dm with no args exits it
+				c.sysf("leaving DM with %s · back to group chat", c.dmTarget)
+				c.dmTarget = ""
+			} else {
+				c.sysf("usage: /dm <name>  or  /dm <name> <message>")
+			}
 			c.mu.Unlock()
 			return
 		}
@@ -465,13 +487,15 @@ func (c *Chat) handleCommand(line string) {
 			c.mu.Lock()
 			c.dmTarget = target
 			fmt.Printf("%s[DM → %s] %s%s\r\n", brightGreen, target, msg, reset)
+			c.appendDMHistory(target, c.name, msg)
 			c.mu.Unlock()
 			c.mgr.SendTo(target, network.Envelope{Type: network.MsgDM, To: target, Body: msg})
 		} else {
 			// Session mode: /dm <name> — enter DM session
 			c.mu.Lock()
 			c.dmTarget = target
-			c.sysf("DM session with %s · type normally to chat · /back to return", target)
+			c.sysf("DM session open with %s · /dm or /back to return to group", target)
+			c.showDMHistory(target)
 			c.mu.Unlock()
 		}
 
@@ -787,6 +811,34 @@ func (c *Chat) quit() {
 	time.Sleep(150 * time.Millisecond)
 	fmt.Printf("\r\n%s[sys] goodbye.%s\r\n", green, reset)
 	os.Exit(0)
+}
+
+// appendDMHistory records a DM message for a peer. Must be called with c.mu held.
+func (c *Chat) appendDMHistory(peer, from, body string) {
+	msgs := c.dmHistory[peer]
+	msgs = append(msgs, dmMessage{from: from, body: body, ts: time.Now()})
+	if len(msgs) > dmHistoryMax {
+		msgs = msgs[len(msgs)-dmHistoryMax:]
+	}
+	c.dmHistory[peer] = msgs
+}
+
+// showDMHistory prints the last N messages for a peer. Must be called with c.mu held.
+func (c *Chat) showDMHistory(peer string) {
+	msgs := c.dmHistory[peer]
+	if len(msgs) == 0 {
+		return
+	}
+	fmt.Printf("%s  ── last %d message(s) with %s ──%s\r\n", dim+green, len(msgs), peer, reset)
+	for _, m := range msgs {
+		ts := m.ts.Format("15:04:05")
+		if m.from == c.name {
+			fmt.Printf("%s  %s [%s → %s]  %s%s\r\n", dim+green, ts, m.from, peer, m.body, reset)
+		} else {
+			fmt.Printf("%s  %s [%s]  %s%s\r\n", dim+green, ts, m.from, m.body, reset)
+		}
+	}
+	fmt.Printf("%s  ──────────────────────────────────%s\r\n", dim+green, reset)
 }
 
 // printHelp prints the full categorised help. Must be called with c.mu held.
