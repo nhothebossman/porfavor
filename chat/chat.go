@@ -125,7 +125,7 @@ func (c *Chat) receiveLoop() {
 			if c.typingFrom == env.From {
 				c.typingFrom = ""
 			}
-			mentioned := strings.Contains(strings.ToLower(env.Body), strings.ToLower(c.name))
+			mentioned := strings.Contains(strings.ToLower(env.Body), "@"+strings.ToLower(c.name))
 			c.printMsg(env.From, env.Body, false, mentioned)
 
 		case network.MsgMe:
