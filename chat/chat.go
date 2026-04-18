@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -33,6 +34,7 @@ type Chat struct {
 	typingTimer *time.Timer
 	typingFrom  string
 	dmTarget    string // non-empty = we're in a DM session with this peer
+	awayMsg     string // non-empty = auto-reply this to incoming DMs
 	mu          sync.Mutex
 	oldState    *term.State
 	rawMode     bool
@@ -119,6 +121,24 @@ func (c *Chat) receiveLoop() {
 
 		case network.MsgDM:
 			fmt.Printf("%s[DM from %s] %s%s\r\n", brightGreen, env.From, env.Body, reset)
+			if c.awayMsg != "" {
+				from := env.From
+				reply := c.awayMsg
+				go c.mgr.SendTo(from, network.Envelope{Type: network.MsgDM, To: from, Body: "[away] " + reply})
+			}
+
+		case network.MsgBurn:
+			fmt.Printf("%s[● %ds burn from %s] %s%s\r\n", brightGreen, env.TTL, env.From, env.Body, reset)
+			ttl := env.TTL
+			from := env.From
+			go func() {
+				time.Sleep(time.Duration(ttl) * time.Second)
+				c.mu.Lock()
+				c.clearInput()
+				fmt.Printf("%s[sys] ● burn message from %s has expired%s\r\n", dim+green, from, reset)
+				c.printPrompt()
+				c.mu.Unlock()
+			}()
 
 		case network.MsgOneTime:
 			fmt.Printf("%s[● onetime from %s] %s%s\r\n", brightGreen, env.From, env.Body, reset)
@@ -242,17 +262,23 @@ func (c *Chat) handleCommand(line string) {
 	case "/help":
 		c.mu.Lock()
 		fmt.Printf("%s", green)
-		fmt.Print("  /help                  — list commands\r\n")
-		fmt.Print("  /peers                 — list who is online\r\n")
-		fmt.Print("  /connect <ip>          — connect directly by IP (mDNS fallback)\r\n")
-		fmt.Print("  /dm <name>             — open a private DM session\r\n")
-		fmt.Print("  /dm <name> <message>   — send a one-off private message\r\n")
-		fmt.Print("  /back                  — return to group chat from DM session\r\n")
-		fmt.Print("  /onetime <name> \"msg\"  — burn-after-reading message (held until they connect)\r\n")
-		fmt.Print("  /nick <newname>        — change your name\r\n")
-		fmt.Print("  /me <action>           — action message\r\n")
-		fmt.Print("  /clear                 — clear screen\r\n")
-		fmt.Print("  /quit                  — exit\r\n")
+		fmt.Print("  /help                     — list commands\r\n")
+		fmt.Print("  /peers                    — list who is online\r\n")
+		fmt.Print("  /dm <name>                — open a private DM session\r\n")
+		fmt.Print("  /dm <name> <message>      — send a one-off private message\r\n")
+		fmt.Print("  /back                     — return to group chat from DM session\r\n")
+		fmt.Print("  /onetime <name> \"msg\"     — burn-after-reading (held until they connect)\r\n")
+		fmt.Print("  /burn <secs> \"msg\"        — self-destructing room message\r\n")
+		fmt.Print("  /away \"message\"           — set away status (auto-replies to DMs)\r\n")
+		fmt.Print("  /away                     — clear away status\r\n")
+		fmt.Print("  /room <name>              — switch to a different room (online only)\r\n")
+		fmt.Print("  /invite                   — print invite command for this room (online only)\r\n")
+		fmt.Print("  /nick <newname>           — change your name\r\n")
+		fmt.Print("  /me <action>              — action message\r\n")
+		fmt.Print("  /connect <ip>             — connect directly by IP (LAN only)\r\n")
+		fmt.Print("  /clear                    — clear screen\r\n")
+		fmt.Print("  /nuke                     — disconnect and exit immediately\r\n")
+		fmt.Print("  /quit                     — exit\r\n")
 		fmt.Printf("%s", reset)
 		c.mu.Unlock()
 
@@ -401,6 +427,109 @@ func (c *Chat) handleCommand(line string) {
 		c.mu.Unlock()
 		c.mgr.SendTo(target, network.Envelope{Type: network.MsgOneTime, To: target, Body: msg})
 
+	case "/burn":
+		if len(parts) < 2 {
+			c.mu.Lock()
+			c.sysf(`usage: /burn <seconds> "message"`)
+			c.mu.Unlock()
+			return
+		}
+		secs, err := strconv.Atoi(parts[1])
+		if err != nil || secs < 1 || secs > 300 {
+			c.mu.Lock()
+			c.sysf("seconds must be between 1 and 300")
+			c.mu.Unlock()
+			return
+		}
+		q1 := strings.Index(line, `"`)
+		q2 := strings.LastIndex(line, `"`)
+		if q1 == -1 || q1 == q2 {
+			c.mu.Lock()
+			c.sysf(`message must be in quotes: /burn %d "your message"`, secs)
+			c.mu.Unlock()
+			return
+		}
+		msg := line[q1+1 : q2]
+		if msg == "" {
+			c.mu.Lock()
+			c.sysf("message cannot be empty")
+			c.mu.Unlock()
+			return
+		}
+		c.mu.Lock()
+		c.sysf("● burn message sent · expires in %ds", secs)
+		c.mu.Unlock()
+		c.mgr.Send(network.Envelope{Type: network.MsgBurn, Body: msg, TTL: secs})
+
+	case "/away":
+		c.mu.Lock()
+		if len(parts) < 2 {
+			if c.awayMsg == "" {
+				c.sysf("not currently away")
+			} else {
+				c.awayMsg = ""
+				c.sysf("away status cleared")
+			}
+			c.mu.Unlock()
+			return
+		}
+		q1 := strings.Index(line, `"`)
+		q2 := strings.LastIndex(line, `"`)
+		var msg string
+		if q1 != -1 && q1 != q2 {
+			msg = line[q1+1 : q2]
+		} else {
+			msg = strings.Join(parts[1:], " ")
+		}
+		c.awayMsg = msg
+		c.sysf("away: %s", msg)
+		c.mu.Unlock()
+
+	case "/room":
+		type switcher interface {
+			SwitchRoom(name string)
+		}
+		sw, ok := c.mgr.(switcher)
+		if !ok {
+			c.mu.Lock()
+			c.sysf("/room is only available in online mode")
+			c.mu.Unlock()
+			return
+		}
+		if len(parts) < 2 {
+			c.mu.Lock()
+			c.sysf("usage: /room <name>")
+			c.mu.Unlock()
+			return
+		}
+		newRoom := parts[1]
+		c.mu.Lock()
+		c.dmTarget = ""
+		c.sysf("switching to room: %s...", newRoom)
+		c.mu.Unlock()
+		sw.SwitchRoom(newRoom)
+
+	case "/invite":
+		type roomer interface {
+			RoomName() string
+		}
+		r, ok := c.mgr.(roomer)
+		if !ok {
+			c.mu.Lock()
+			c.sysf("/invite is only available in online mode")
+			c.mu.Unlock()
+			return
+		}
+		c.mu.Lock()
+		fmt.Printf("%s  invite: porfavor --room %s%s\r\n", brightGreen, r.RoomName(), reset)
+		c.mu.Unlock()
+
+	case "/nuke":
+		c.restore()
+		c.mgr.Shutdown()
+		fmt.Print(clearScreen)
+		os.Exit(0)
+
 	case "/quit", "/exit":
 		c.quit()
 
@@ -453,24 +582,35 @@ func (c *Chat) sysf(format string, args ...any) {
 	fmt.Printf("%s[sys] %s%s\r\n", dim+green, msg, reset)
 }
 
+func (c *Chat) promptLabel() string {
+	label := c.name
+	if c.dmTarget != "" {
+		label = c.name + " → " + c.dmTarget
+	}
+	if c.awayMsg != "" {
+		label += " · away"
+	}
+	return label
+}
+
 func (c *Chat) printPrompt() {
 	ts := time.Now().Format("15:04:05")
 	buf := string(c.inputBuf)
+	color := green
 	if c.dmTarget != "" {
-		fmt.Printf("%s%s [%s → %s]  %s█%s", brightGreen, ts, c.name, c.dmTarget, buf, reset)
-	} else {
-		fmt.Printf("%s%s [%s]  %s█%s", green, ts, c.name, buf, reset)
+		color = brightGreen
 	}
+	fmt.Printf("%s%s [%s]  %s█%s", color, ts, c.promptLabel(), buf, reset)
 }
 
 func (c *Chat) redrawInput() {
 	ts := time.Now().Format("15:04:05")
 	buf := string(c.inputBuf)
+	color := green
 	if c.dmTarget != "" {
-		fmt.Printf("%s%s%s [%s → %s]  %s█%s", clearLine, brightGreen, ts, c.name, c.dmTarget, buf, reset)
-	} else {
-		fmt.Printf("%s%s%s [%s]  %s█%s", clearLine, green, ts, c.name, buf, reset)
+		color = brightGreen
 	}
+	fmt.Printf("%s%s%s [%s]  %s█%s", clearLine, color, ts, c.promptLabel(), buf, reset)
 }
 
 func (c *Chat) clearInput() {

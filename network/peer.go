@@ -30,6 +30,7 @@ const (
 	MsgChat    MsgType = "chat"
 	MsgDM      MsgType = "dm"
 	MsgOneTime MsgType = "onetime"
+	MsgBurn    MsgType = "burn"
 	MsgTyping  MsgType = "typing"
 	MsgJoin    MsgType = "join"
 	MsgLeave   MsgType = "leave"
@@ -46,6 +47,7 @@ type Envelope struct {
 	Nonce   []byte  `json:"n,omitempty"`
 	Payload []byte  `json:"p,omitempty"`
 	PubKey  []byte  `json:"pk,omitempty"` // X25519 pubkey, sent in MsgJoin for E2E
+	TTL     int     `json:"ttl,omitempty"` // seconds until expiry (MsgBurn only)
 }
 
 type Peer struct {
@@ -544,7 +546,7 @@ func (m *Manager) sendError(msg string) {
 }
 
 func isEncrypted(t MsgType) bool {
-	return t == MsgChat || t == MsgDM || t == MsgMe || t == MsgOneTime
+	return t == MsgChat || t == MsgDM || t == MsgMe || t == MsgOneTime || t == MsgBurn
 }
 
 func writeFrame(conn net.Conn, data []byte) error {

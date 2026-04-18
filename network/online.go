@@ -27,7 +27,9 @@ type OnlineManager struct {
 	LocalName string
 
 	serverURL string // full URL including room path
+	roomName  string // original room name (for /invite and /room)
 	roomKey   []byte // 32-byte key derived from room password (group encryption)
+	baseURL   string // relay URL without room path (for switching rooms)
 
 	privKey     *ecdh.PrivateKey
 	pubKeyBytes []byte
@@ -72,13 +74,58 @@ func NewOnlineManager(name, serverURL, roomName string) *OnlineManager {
 	return &OnlineManager{
 		LocalName:   name,
 		serverURL:   serverURL + "/room/" + roomPath,
+		roomName:    roomName,
 		roomKey:     roomKey,
+		baseURL:     serverURL,
 		privKey:     priv,
 		pubKeyBytes: priv.PublicKey().Bytes(),
 		incoming:    make(chan Envelope, 128),
 		peers:       make(map[string]*onlinePeer),
 		quit:        make(chan struct{}),
 	}
+}
+
+// RoomName returns the current room name (used by /invite).
+func (m *OnlineManager) RoomName() string {
+	return m.roomName
+}
+
+// SwitchRoom leaves the current room and joins a new one mid-session.
+func (m *OnlineManager) SwitchRoom(newRoom string) {
+	if newRoom == "" {
+		newRoom = "default"
+	}
+
+	// Leave current room
+	m.sendRaw(Envelope{Type: MsgLeave, From: m.LocalName, Body: m.LocalName})
+
+	// Derive new room path and key
+	pathHash := sha256.Sum256([]byte("porfavor-path:" + newRoom))
+	roomPath := hex.EncodeToString(pathHash[:16])
+
+	// Fresh keypair for the new room session
+	curve := ecdh.X25519()
+	if priv, err := curve.GenerateKey(rand.Reader); err == nil {
+		m.privKey = priv
+		m.pubKeyBytes = priv.PublicKey().Bytes()
+	}
+
+	// Update room state
+	m.roomName = newRoom
+	m.roomKey = deriveRoomKey(newRoom)
+	m.serverURL = m.baseURL + "/room/" + roomPath
+
+	// Clear peers
+	m.peersMu.Lock()
+	m.peers = make(map[string]*onlinePeer)
+	m.peersMu.Unlock()
+
+	// Force reconnect — connectLoop will pick up the new serverURL
+	m.connMu.Lock()
+	if m.wsConn != nil {
+		m.wsConn.Close()
+	}
+	m.connMu.Unlock()
 }
 
 func deriveRoomKey(roomName string) []byte {
