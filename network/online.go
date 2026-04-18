@@ -2,6 +2,7 @@ package network
 
 import (
 	"encoding/json"
+	"net"
 	"sync"
 	"time"
 
@@ -56,7 +57,13 @@ func (m *OnlineManager) connectLoop() {
 		default:
 		}
 
-		conn, _, err := websocket.DefaultDialer.Dial(m.serverURL, nil)
+		// Force IPv4 — IPv6 is unreachable on many mobile/Termux setups
+		dialer := websocket.Dialer{
+			NetDial: func(network, addr string) (net.Conn, error) {
+				return net.Dial("tcp4", addr)
+			},
+		}
+		conn, _, err := dialer.Dial(m.serverURL, nil)
 		if err != nil {
 			m.sendError("relay unreachable — retrying in 5s: " + err.Error())
 			select {
