@@ -58,6 +58,35 @@ func highlightCode(body, baseColor string) string {
 	return out.String()
 }
 
+// wrapText splits text into lines of at most width runes, breaking at spaces
+// where possible. Returns the original text as a single element if width <= 0.
+func wrapText(text string, width int) []string {
+	runes := []rune(text)
+	if width <= 0 || len(runes) <= width {
+		return []string{text}
+	}
+	var lines []string
+	for len(runes) > width {
+		split := width
+		// Walk back from the limit looking for a space to break on
+		for split > width/2 && runes[split] != ' ' {
+			split--
+		}
+		if runes[split] == ' ' {
+			lines = append(lines, string(runes[:split]))
+			runes = runes[split+1:] // consume the space
+		} else {
+			// No space in back half — hard break
+			lines = append(lines, string(runes[:width]))
+			runes = runes[width:]
+		}
+	}
+	if len(runes) > 0 {
+		lines = append(lines, string(runes))
+	}
+	return lines
+}
+
 const historyMax = 50
 const dmHistoryMax = 5
 
@@ -71,6 +100,7 @@ type Chat struct {
 	mgr         network.Backend
 	name        string
 	inputBuf    []rune
+	cursorPos   int // position within inputBuf; 0=start, len=end
 	typing      bool
 	typingTimer *time.Timer
 	typingFrom  string
@@ -256,6 +286,7 @@ func (c *Chat) inputLoop() {
 		case '\r', '\n':
 			line := strings.TrimSpace(string(c.inputBuf))
 			c.inputBuf = c.inputBuf[:0]
+			c.cursorPos = 0
 			c.histIdx = -1
 			c.histDraft = ""
 			c.tabMatches = nil
@@ -272,9 +303,11 @@ func (c *Chat) inputLoop() {
 			c.printPrompt()
 			c.mu.Unlock()
 
-		case 127, '\b': // backspace
-			if len(c.inputBuf) > 0 {
+		case 127, '\b': // backspace — delete character left of cursor
+			if c.cursorPos > 0 {
+				copy(c.inputBuf[c.cursorPos-1:], c.inputBuf[c.cursorPos:])
 				c.inputBuf = c.inputBuf[:len(c.inputBuf)-1]
+				c.cursorPos--
 			}
 			c.tabMatches = nil
 			c.redrawInput()
@@ -304,13 +337,33 @@ func (c *Chat) inputLoop() {
 					c.historyUp()
 				case 'B': // down arrow — newer history
 					c.historyDown()
+				case 'C': // right arrow — move cursor right
+					if c.cursorPos < len(c.inputBuf) {
+						c.cursorPos++
+						c.redrawInput()
+					}
+				case 'D': // left arrow — move cursor left
+					if c.cursorPos > 0 {
+						c.cursorPos--
+						c.redrawInput()
+					}
+				case 'H': // Home — jump to start
+					c.cursorPos = 0
+					c.redrawInput()
+				case 'F': // End — jump to end
+					c.cursorPos = len(c.inputBuf)
+					c.redrawInput()
 				}
 			}
 			c.mu.Unlock()
 
 		default:
 			if utf8.ValidRune(r) && r >= 32 {
-				c.inputBuf = append(c.inputBuf, r)
+				// Insert at cursor position
+				c.inputBuf = append(c.inputBuf, 0)
+				copy(c.inputBuf[c.cursorPos+1:], c.inputBuf[c.cursorPos:])
+				c.inputBuf[c.cursorPos] = r
+				c.cursorPos++
 				c.tabMatches = nil
 				c.startTyping()
 				c.redrawInput()
@@ -350,6 +403,7 @@ func (c *Chat) historyUp() {
 	}
 	c.histIdx = next
 	c.inputBuf = []rune(c.history[c.histIdx])
+	c.cursorPos = len(c.inputBuf)
 	c.redrawInput()
 }
 
@@ -364,6 +418,7 @@ func (c *Chat) historyDown() {
 	} else {
 		c.inputBuf = []rune(c.history[c.histIdx])
 	}
+	c.cursorPos = len(c.inputBuf)
 	c.redrawInput()
 }
 
@@ -395,6 +450,7 @@ func (c *Chat) doTabComplete() {
 		c.tabIdx = (c.tabIdx + 1) % len(c.tabMatches)
 	}
 	c.inputBuf = []rune(c.tabMatches[c.tabIdx] + " ")
+	c.cursorPos = len(c.inputBuf)
 	c.redrawInput()
 }
 
@@ -808,14 +864,37 @@ func (c *Chat) stopTyping() {
 
 func (c *Chat) printMsg(name, body string, isSelf, mentioned bool) {
 	ts := time.Now().Format("15:04:05")
-	switch {
-	case isSelf:
-		fmt.Printf("%s%s [%s]  %s%s\r\n", brightGreen, ts, name, highlightCode(body, brightGreen), reset)
-	case mentioned:
-		fmt.Printf("%s%s [%s]  ◆ %s%s\r\n", brightGreen, ts, name, highlightCode(body, brightGreen), reset)
-		fmt.Print("\a") // terminal bell
-	default:
-		fmt.Printf("%s%s [%s]  %s%s\r\n", green, ts, name, highlightCode(body, green), reset)
+
+	baseColor := green
+	if isSelf || mentioned {
+		baseColor = brightGreen
+	}
+
+	// "HH:MM:SS [NAME]  " — prefix width for indent alignment
+	prefixLen := 10 + 3 + utf8.RuneCountInString(name) + 2
+	indent := strings.Repeat(" ", prefixLen)
+
+	bodyWidth := 0
+	if w, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && w > prefixLen+10 {
+		bodyWidth = w - prefixLen
+	}
+
+	lines := wrapText(body, bodyWidth)
+	for i, line := range lines {
+		hl := highlightCode(line, baseColor)
+		if i == 0 {
+			switch {
+			case isSelf:
+				fmt.Printf("%s%s [%s]  %s%s\r\n", brightGreen, ts, name, hl, reset)
+			case mentioned:
+				fmt.Printf("%s%s [%s]  ◆ %s%s\r\n", brightGreen, ts, name, hl, reset)
+				fmt.Print("\a")
+			default:
+				fmt.Printf("%s%s [%s]  %s%s\r\n", green, ts, name, hl, reset)
+			}
+		} else {
+			fmt.Printf("%s%s%s%s\r\n", baseColor, indent, hl, reset)
+		}
 	}
 }
 
@@ -838,22 +917,24 @@ func (c *Chat) promptLabel() string {
 
 func (c *Chat) printPrompt() {
 	ts := time.Now().Format("15:04:05")
-	buf := string(c.inputBuf)
+	before := string(c.inputBuf[:c.cursorPos])
+	after := string(c.inputBuf[c.cursorPos:])
 	color := green
 	if c.dmTarget != "" {
 		color = brightGreen
 	}
-	fmt.Printf("%s%s [%s]  %s█%s", color, ts, c.promptLabel(), buf, reset)
+	fmt.Printf("%s%s [%s]  %s█%s%s", color, ts, c.promptLabel(), before, after, reset)
 }
 
 func (c *Chat) redrawInput() {
 	ts := time.Now().Format("15:04:05")
-	buf := string(c.inputBuf)
+	before := string(c.inputBuf[:c.cursorPos])
+	after := string(c.inputBuf[c.cursorPos:])
 	color := green
 	if c.dmTarget != "" {
 		color = brightGreen
 	}
-	fmt.Printf("%s%s%s [%s]  %s█%s", clearLine, color, ts, c.promptLabel(), buf, reset)
+	fmt.Printf("%s%s%s [%s]  %s█%s%s", clearLine, color, ts, c.promptLabel(), before, after, reset)
 }
 
 func (c *Chat) clearInput() {
