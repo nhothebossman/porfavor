@@ -38,17 +38,19 @@ const (
 	MsgNick    MsgType = "nick"
 	MsgMe      MsgType = "me"
 	MsgError   MsgType = "error"
+	MsgExpiry  MsgType = "expiry" // room has expired — broadcast by relay alarm
 )
 
 type Envelope struct {
-	Type    MsgType `json:"t"`
-	From    string  `json:"f"`
-	To      string  `json:"to,omitempty"`
-	Body    string  `json:"b,omitempty"`
-	Nonce   []byte  `json:"n,omitempty"`
-	Payload []byte  `json:"p,omitempty"`
-	PubKey  []byte  `json:"pk,omitempty"` // X25519 pubkey, sent in MsgJoin for E2E
-	TTL     int     `json:"ttl,omitempty"` // seconds until expiry (MsgBurn only)
+	Type      MsgType `json:"t"`
+	From      string  `json:"f"`
+	To        string  `json:"to,omitempty"`
+	Body      string  `json:"b,omitempty"`
+	Nonce     []byte  `json:"n,omitempty"`
+	Payload   []byte  `json:"p,omitempty"`
+	PubKey    []byte  `json:"pk,omitempty"`  // X25519 pubkey, sent in MsgJoin for E2E
+	TTL       int     `json:"ttl,omitempty"` // seconds until expiry (MsgBurn only)
+	ExpiresAt int64   `json:"exp,omitempty"` // unix timestamp (seconds) when room expires
 }
 
 type Peer struct {

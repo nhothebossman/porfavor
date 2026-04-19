@@ -258,6 +258,24 @@ func (c *Chat) receiveLoop() {
 
 		case network.MsgError:
 			c.sysf("⚠  %s", env.Body)
+
+		case network.MsgExpiry:
+			// Room has been deleted by the relay. Wipe keys, show message, exit.
+			type keyWiper interface{ WipeKeys() }
+			if w, ok := c.mgr.(keyWiper); ok {
+				w.WipeKeys()
+			}
+			fmt.Printf("\033[1m%s[sys] ⚠  %s%s\r\n", green, env.Body, reset)
+			fmt.Printf("%s[sys] keys wiped — this room never existed.%s\r\n", dim+green, reset)
+			c.printPrompt()
+			c.mu.Unlock()
+			go func() {
+				time.Sleep(3 * time.Second)
+				c.restore()
+				fmt.Printf("\r\n%s[sys] connection closed.%s\r\n", green, reset)
+				os.Exit(0)
+			}()
+			continue
 		}
 
 		c.printPrompt()

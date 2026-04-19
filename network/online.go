@@ -33,6 +33,7 @@ type OnlineManager struct {
 	roomName  string // original room name (for /invite and /room)
 	roomKey   []byte // 32-byte key derived from room password (group encryption)
 	baseURL   string // relay URL without room path (for switching rooms)
+	expiresAt int64  // unix timestamp (seconds) when room expires; 0 = no expiry
 
 	privKey     *ecdh.PrivateKey
 	pubKeyBytes []byte
@@ -45,14 +46,16 @@ type OnlineManager struct {
 	peers    map[string]*onlinePeer
 	peersMu  sync.RWMutex
 
-	quit chan struct{}
-	once sync.Once
+	quit    chan struct{}
+	expired chan struct{} // closed when relay broadcasts MsgExpiry
+	once    sync.Once
 }
 
 // NewOnlineManager creates a manager that connects to the relay.
 // roomName is used to derive both the room encryption key and the room path.
 // Defaults to "default" if empty.
-func NewOnlineManager(name, serverURL, roomName string) *OnlineManager {
+// expiresAt is a unix timestamp (seconds) for room expiry; pass 0 for no expiry.
+func NewOnlineManager(name, serverURL, roomName string, expiresAt int64) *OnlineManager {
 	if serverURL == "" {
 		serverURL = DefaultRelayURL
 	}
@@ -80,11 +83,13 @@ func NewOnlineManager(name, serverURL, roomName string) *OnlineManager {
 		roomName:    roomName,
 		roomKey:     roomKey,
 		baseURL:     serverURL,
+		expiresAt:   expiresAt,
 		privKey:     priv,
 		pubKeyBytes: priv.PublicKey().Bytes(),
 		incoming:    make(chan Envelope, 128),
 		peers:       make(map[string]*onlinePeer),
 		quit:        make(chan struct{}),
+		expired:     make(chan struct{}),
 	}
 }
 
@@ -117,6 +122,7 @@ func (m *OnlineManager) SwitchRoom(newRoom string) {
 	m.roomName = newRoom
 	m.roomKey = deriveRoomKey(newRoom)
 	m.serverURL = m.baseURL + "/room/" + roomPath
+	m.expiresAt = 0 // new room does not inherit expiry
 
 	// Clear peers
 	m.peersMu.Lock()
@@ -172,6 +178,8 @@ func (m *OnlineManager) connectLoop() {
 		select {
 		case <-m.quit:
 			return
+		case <-m.expired:
+			return
 		default:
 		}
 
@@ -222,13 +230,27 @@ func (m *OnlineManager) connectLoop() {
 		}
 		first = false
 
-		// Announce ourselves with our public key for E2E key exchange
-		m.sendRaw(Envelope{
+		// Announce ourselves with our public key for E2E key exchange.
+		// Include ExpiresAt if this session created the room with --expires.
+		joinEnv := Envelope{
 			Type:   MsgJoin,
 			From:   m.LocalName,
 			Body:   m.LocalName,
 			PubKey: m.pubKeyBytes,
-		})
+		}
+		if m.expiresAt != 0 {
+			joinEnv.ExpiresAt = m.expiresAt
+			remaining := time.Until(time.Unix(m.expiresAt, 0))
+			if remaining > 0 {
+				m.incoming <- Envelope{
+					Type: MsgError,
+					Body: fmt.Sprintf("⏳ room expires in %s (at %s)",
+						formatDuration(remaining),
+						time.Unix(m.expiresAt, 0).Format("15:04:05")),
+				}
+			}
+		}
+		m.sendRaw(joinEnv)
 
 		m.readLoop(conn)
 
@@ -243,6 +265,8 @@ func (m *OnlineManager) connectLoop() {
 
 		select {
 		case <-m.quit:
+			return
+		case <-m.expired:
 			return
 		case <-time.After(3 * time.Second):
 			m.sendError("relay disconnected, reconnecting...")
@@ -302,6 +326,14 @@ func (m *OnlineManager) readLoop(conn *websocket.Conn) {
 			delete(m.peers, env.From)
 			m.peers[env.Body] = peer
 			m.peersMu.Unlock()
+
+		case MsgExpiry:
+			// Signal that the room has expired — connectLoop will not attempt to reconnect.
+			select {
+			case <-m.expired: // already closed
+			default:
+				close(m.expired)
+			}
 		}
 
 		m.incoming <- env
@@ -441,5 +473,40 @@ func (m *OnlineManager) sendError(msg string) {
 	select {
 	case m.incoming <- Envelope{Type: MsgError, Body: msg}:
 	default:
+	}
+}
+
+// WipeKeys zeroes out all encryption keys held in memory.
+// Called when the room expires so keys can't be reused after exit.
+func (m *OnlineManager) WipeKeys() {
+	for i := range m.roomKey {
+		m.roomKey[i] = 0
+	}
+	m.peersMu.Lock()
+	for _, p := range m.peers {
+		for i := range p.dmKey {
+			p.dmKey[i] = 0
+		}
+	}
+	m.peersMu.Unlock()
+}
+
+// formatDuration formats a duration as a human-readable string (e.g. "1h30m", "45m", "30s").
+func formatDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+	h := int(d.Hours())
+	m := int(d.Minutes()) % 60
+	s := int(d.Seconds()) % 60
+	switch {
+	case h > 0 && m > 0:
+		return fmt.Sprintf("%dh%dm", h, m)
+	case h > 0:
+		return fmt.Sprintf("%dh", h)
+	case m > 0 && s > 0:
+		return fmt.Sprintf("%dm%ds", m, s)
+	case m > 0:
+		return fmt.Sprintf("%dm", m)
+	default:
+		return fmt.Sprintf("%ds", s)
 	}
 }

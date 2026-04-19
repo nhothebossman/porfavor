@@ -19,14 +19,30 @@ var version = "dev"
 
 func main() {
 	var (
-		lanMode   = flag.Bool("lan", false, "use LAN mode (mDNS) instead of online relay")
-		serverURL = flag.String("server", network.DefaultRelayURL, "relay server WebSocket URL")
-		roomName  = flag.String("room", "default", "room name / password (shared with peers)")
-		nameFlag  = flag.String("name", "", "override saved name for this session")
-		ver       = flag.Bool("version", false, "print version and exit")
-		sendMode  = flag.Bool("send", false, "read from stdin and send as a message, then exit")
+		lanMode     = flag.Bool("lan", false, "use LAN mode (mDNS) instead of online relay")
+		serverURL   = flag.String("server", network.DefaultRelayURL, "relay server WebSocket URL")
+		roomName    = flag.String("room", "default", "room name / password (shared with peers)")
+		nameFlag    = flag.String("name", "", "override saved name for this session")
+		ver         = flag.Bool("version", false, "print version and exit")
+		sendMode    = flag.Bool("send", false, "read from stdin and send as a message, then exit")
+		expiresFlag = flag.String("expires", "", "room lifetime, e.g. 30m, 2h, 1h30m — room is deleted after this duration (online only)")
 	)
 	flag.Parse()
+
+	// Parse --expires into a unix timestamp.
+	var expiresAt int64
+	if *expiresFlag != "" {
+		if *lanMode {
+			fmt.Fprintln(os.Stderr, "error: --expires is only available in online mode (remove --lan)")
+			os.Exit(1)
+		}
+		dur, err := time.ParseDuration(*expiresFlag)
+		if err != nil || dur <= 0 {
+			fmt.Fprintf(os.Stderr, "error: invalid --expires value %q — use e.g. 30m, 2h, 1h30m\n", *expiresFlag)
+			os.Exit(1)
+		}
+		expiresAt = time.Now().Add(dur).Unix()
+	}
 
 	if *ver {
 		fmt.Println("porfavor " + version)
@@ -48,7 +64,7 @@ func main() {
 		if name == "" {
 			name = loadNameSilent()
 		}
-		mgr := network.NewOnlineManager(name, *serverURL, *roomName)
+		mgr := network.NewOnlineManager(name, *serverURL, *roomName, 0) // pipe mode: no expiry
 		mgr.Start()
 		time.Sleep(700 * time.Millisecond) // wait for relay connection
 		mgr.Send(network.Envelope{Type: network.MsgChat, Body: msg})
@@ -72,7 +88,7 @@ func main() {
 		mgr = network.NewManager(name)
 	} else {
 		fmt.Printf("\033[2m\033[32m  [mode] online · %s\033[0m\n\n", *serverURL)
-		mgr = network.NewOnlineManager(name, *serverURL, *roomName)
+		mgr = network.NewOnlineManager(name, *serverURL, *roomName, expiresAt)
 	}
 
 	mgr.Start()
