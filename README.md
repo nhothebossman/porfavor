@@ -331,4 +331,12 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zshrc && source ~/.zshrc
 
 ---
 
+---
+
+## Documentation
+
+**[Practical Guide →](docs/guide.md)** — Five real scenarios with exact commands: incident response war rooms, red team coordination, one-time secret sharing, automated alerts, and LAN-only ops.
+
+---
+
 *No server reads your messages. No account required. No trace.*
