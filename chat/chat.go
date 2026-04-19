@@ -20,11 +20,43 @@ import (
 const (
 	green       = "\033[32m"
 	brightGreen = "\033[92m"
+	cyan        = "\033[36m"
 	dim         = "\033[2m"
 	reset       = "\033[0m"
 	clearLine   = "\033[2K\r"
 	clearScreen = "\033[2J\033[H"
 )
+
+// highlightCode replaces `backtick` segments with cyan ANSI colour, then
+// restores baseColor. Unmatched backticks are left as-is.
+func highlightCode(body, baseColor string) string {
+	if !strings.Contains(body, "`") {
+		return body
+	}
+	var out strings.Builder
+	rest := body
+	for {
+		start := strings.Index(rest, "`")
+		if start == -1 {
+			out.WriteString(rest)
+			break
+		}
+		out.WriteString(rest[:start])
+		rest = rest[start+1:]
+		end := strings.Index(rest, "`")
+		if end == -1 {
+			// No closing backtick — emit the opening backtick and continue
+			out.WriteByte('`')
+			out.WriteString(rest)
+			break
+		}
+		out.WriteString(cyan)
+		out.WriteString(rest[:end])
+		out.WriteString(baseColor)
+		rest = rest[end+1:]
+	}
+	return out.String()
+}
 
 const historyMax = 50
 const dmHistoryMax = 5
@@ -149,7 +181,7 @@ func (c *Chat) receiveLoop() {
 			fmt.Printf("%s* %s %s%s\r\n", green, env.From, env.Body, reset)
 
 		case network.MsgDM:
-			fmt.Printf("%s[DM from %s] %s%s\r\n", brightGreen, env.From, env.Body, reset)
+			fmt.Printf("%s[DM from %s] %s%s\r\n", brightGreen, env.From, highlightCode(env.Body, brightGreen), reset)
 			c.appendDMHistory(env.From, env.From, env.Body)
 			if c.awayMsg != "" {
 				from := env.From
@@ -387,7 +419,7 @@ func (c *Chat) dispatch(line string) {
 	if target != "" {
 		// In a DM session — send as DM
 		c.mu.Lock()
-		fmt.Printf("%s[DM → %s] %s%s\r\n", brightGreen, target, line, reset)
+		fmt.Printf("%s[DM → %s] %s%s\r\n", brightGreen, target, highlightCode(line, brightGreen), reset)
 		c.appendDMHistory(target, c.name, line)
 		c.mu.Unlock()
 		c.mgr.SendTo(target, network.Envelope{Type: network.MsgDM, To: target, Body: line})
@@ -748,12 +780,12 @@ func (c *Chat) printMsg(name, body string, isSelf, mentioned bool) {
 	ts := time.Now().Format("15:04:05")
 	switch {
 	case isSelf:
-		fmt.Printf("%s%s [%s]  %s%s\r\n", brightGreen, ts, name, body, reset)
+		fmt.Printf("%s%s [%s]  %s%s\r\n", brightGreen, ts, name, highlightCode(body, brightGreen), reset)
 	case mentioned:
-		fmt.Printf("%s%s [%s]  ◆ %s%s\r\n", brightGreen, ts, name, body, reset)
+		fmt.Printf("%s%s [%s]  ◆ %s%s\r\n", brightGreen, ts, name, highlightCode(body, brightGreen), reset)
 		fmt.Print("\a") // terminal bell
 	default:
-		fmt.Printf("%s%s [%s]  %s%s\r\n", green, ts, name, body, reset)
+		fmt.Printf("%s%s [%s]  %s%s\r\n", green, ts, name, highlightCode(body, green), reset)
 	}
 }
 

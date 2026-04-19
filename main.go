@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"porfavor/chat"
 	"porfavor/logo"
@@ -23,11 +24,36 @@ func main() {
 		roomName  = flag.String("room", "default", "room name / password (shared with peers)")
 		nameFlag  = flag.String("name", "", "override saved name for this session")
 		ver       = flag.Bool("version", false, "print version and exit")
+		sendMode  = flag.Bool("send", false, "read from stdin and send as a message, then exit")
 	)
 	flag.Parse()
 
 	if *ver {
 		fmt.Println("porfavor " + version)
+		return
+	}
+
+	// Pipe mode: read stdin → send → exit. No logo, no interactive UI.
+	if *sendMode {
+		scanner := bufio.NewScanner(os.Stdin)
+		var lines []string
+		for scanner.Scan() {
+			lines = append(lines, scanner.Text())
+		}
+		msg := strings.TrimSpace(strings.Join(lines, "\n"))
+		if msg == "" {
+			return
+		}
+		name := *nameFlag
+		if name == "" {
+			name = loadNameSilent()
+		}
+		mgr := network.NewOnlineManager(name, *serverURL, *roomName)
+		mgr.Start()
+		time.Sleep(700 * time.Millisecond) // wait for relay connection
+		mgr.Send(network.Envelope{Type: network.MsgChat, Body: msg})
+		time.Sleep(250 * time.Millisecond) // wait for delivery
+		mgr.Shutdown()
 		return
 	}
 
@@ -91,4 +117,19 @@ func configFile() string {
 
 func saveName(path, name string) {
 	_ = os.WriteFile(path, []byte(name), 0600)
+}
+
+// loadNameSilent reads the saved name without prompting.
+// Falls back to hostname, then "pipe".
+func loadNameSilent() string {
+	data, err := os.ReadFile(configFile())
+	if err == nil {
+		if name := strings.TrimSpace(string(data)); name != "" {
+			return name
+		}
+	}
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return h
+	}
+	return "pipe"
 }
