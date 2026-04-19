@@ -438,8 +438,10 @@ func (c *Chat) inputLoop() {
 			c.mu.Unlock()
 
 		default:
-			// ? — show usage hint for the command being typed, without inserting ?
-			if r == '?' && len(c.inputBuf) > 0 && c.inputBuf[0] == '/' {
+			// ? — show command usage hint.
+			// Fires when: buffer is empty (show all), or buffer starts with / (show matches).
+			// If the buffer has regular message text, ? is inserted normally.
+			if r == '?' && (len(c.inputBuf) == 0 || c.inputBuf[0] == '/') {
 				c.showCommandHint(string(c.inputBuf))
 				c.redrawInput()
 				c.mu.Unlock()
@@ -1138,17 +1140,27 @@ func (c *Chat) showDMHistory(peer string) {
 }
 
 // showCommandHint prints usage for the command currently being typed.
-// Triggered by pressing ? while the input buffer starts with /.
+// Press ? with an empty buffer → show all commands.
+// Press ? while typing /something → show matching commands.
 // Must be called with c.mu held.
 func (c *Chat) showCommandHint(buf string) {
 	fmt.Print(clearLine)
-	fields := strings.Fields(buf)
-	if len(fields) == 0 {
+
+	// Empty buffer — show everything as a quick reference
+	if strings.TrimSpace(buf) == "" {
+		fmt.Printf("%s  commands:%s\r\n", dim+green, reset)
+		for _, cmd := range allCommands {
+			if hint, ok := commandHints[cmd]; ok {
+				fmt.Printf("%s  %-10s  %s%s\r\n", dim+green, cmd, hint[len(cmd):], reset)
+			}
+		}
 		return
 	}
+
+	fields := strings.Fields(buf)
 	cmdTyped := strings.ToLower(fields[0])
 
-	// Exact command match
+	// Exact command match — show its usage
 	if hint, ok := commandHints[cmdTyped]; ok {
 		fmt.Printf("%s  %s%s\r\n", dim+green, hint, reset)
 		return
