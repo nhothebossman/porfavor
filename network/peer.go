@@ -518,9 +518,9 @@ func (m *Manager) ConnectToAddr(addr string) error {
 }
 
 func (m *Manager) UpdateName(newName string) {
-	old := m.LocalName
+	// Send before flipping LocalName so Send's "stamp From = LocalName" uses the old name.
+	m.Send(Envelope{Type: MsgNick, Body: newName})
 	m.LocalName = newName
-	m.Send(Envelope{Type: MsgNick, From: old, Body: newName})
 }
 
 func (m *Manager) sendEnvelope(p *Peer, env Envelope) {

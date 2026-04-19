@@ -452,14 +452,17 @@ func (m *OnlineManager) DMKeyFingerprint(peer string) string {
 }
 
 func (m *OnlineManager) UpdateName(newName string) {
-	old := m.LocalName
+	// Send before flipping LocalName so Send's "stamp From = LocalName" uses the old name.
+	// If we assigned first, From would be the new name and peers would see "ALICE2 is now known as ALICE2".
+	m.Send(Envelope{Type: MsgNick, Body: newName})
 	m.LocalName = newName
-	m.Send(Envelope{Type: MsgNick, From: old, Body: newName})
 }
 
 func (m *OnlineManager) Shutdown() {
+	// Does NOT send MsgLeave — that is the caller's responsibility if a graceful departure
+	// is wanted. quit() sends leave explicitly before calling Shutdown. /nuke calls Shutdown
+	// directly and intentionally skips the announcement.
 	m.once.Do(func() {
-		m.sendRaw(Envelope{Type: MsgLeave, From: m.LocalName, Body: m.LocalName})
 		close(m.quit)
 		m.connMu.Lock()
 		if m.wsConn != nil {

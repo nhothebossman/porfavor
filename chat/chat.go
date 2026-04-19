@@ -1094,8 +1094,9 @@ func (c *Chat) printCommandHelp(cmd string) {
 		"nuke": {
 			"/nuke",
 			"Panic exit.\n" +
-				"  Disconnects immediately, clears the screen, exits.\n" +
-				"  No goodbye message. No trace in the terminal.",
+				"  Closes the connection without sending a leave notice.\n" +
+				"  Clears the screen and exits immediately. No local trace.\n" +
+				"  Peers see the relay close the socket — no named departure is announced.",
 			"/nuke",
 		},
 		"nick": {
@@ -1131,7 +1132,7 @@ func (c *Chat) printCommandHelp(cmd string) {
 			"/connect 192.168.1.42",
 		},
 		"clear": {"/clear", "Clear the terminal screen.", "/clear"},
-		"quit":  {"/quit", "Exit gracefully. Sends a leave notice to peers.", "/quit"},
+		"quit":  {"/quit", "Exit gracefully. Announces your departure to peers, then disconnects.", "/quit"},
 	}
 
 	e, ok := help[cmd]
