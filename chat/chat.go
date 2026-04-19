@@ -183,7 +183,7 @@ func (c *Chat) bootSequence() {
 		}
 		c.sysf("channel open · %d peer(s) online ✓", len(peers))
 	}
-	c.sysf("/help for commands · Tab to autocomplete · ? for usage hints")
+	c.sysf("/help for commands · Tab to autocomplete · type / then ? for usage hints")
 	c.printPrompt()
 }
 
@@ -438,10 +438,10 @@ func (c *Chat) inputLoop() {
 			c.mu.Unlock()
 
 		default:
-			// ? — show command usage hint.
-			// Fires when: buffer is empty (show all), or buffer starts with / (show matches).
-			// If the buffer has regular message text, ? is inserted normally.
-			if r == '?' && (len(c.inputBuf) == 0 || c.inputBuf[0] == '/') {
+			// ? — show command usage hint only when typing a slash command.
+			// If the buffer starts with / , ? shows matching command hints.
+			// Any other context (empty buffer, regular message) inserts ? normally.
+			if r == '?' && len(c.inputBuf) > 0 && c.inputBuf[0] == '/' {
 				c.showCommandHint(string(c.inputBuf))
 				c.redrawInput()
 				c.mu.Unlock()
@@ -1139,25 +1139,16 @@ func (c *Chat) showDMHistory(peer string) {
 	fmt.Printf("%s  ──────────────────────────────────%s\r\n", dim+green, reset)
 }
 
-// showCommandHint prints usage for the command currently being typed.
-// Press ? with an empty buffer → show all commands.
-// Press ? while typing /something → show matching commands.
+// showCommandHint prints usage for the slash command currently being typed.
+// Only called when the buffer starts with /. Press ? to trigger.
 // Must be called with c.mu held.
 func (c *Chat) showCommandHint(buf string) {
 	fmt.Print(clearLine)
 
-	// Empty buffer — show everything as a quick reference
-	if strings.TrimSpace(buf) == "" {
-		fmt.Printf("%s  commands:%s\r\n", dim+green, reset)
-		for _, cmd := range allCommands {
-			if hint, ok := commandHints[cmd]; ok {
-				fmt.Printf("%s  %-10s  %s%s\r\n", dim+green, cmd, hint[len(cmd):], reset)
-			}
-		}
+	fields := strings.Fields(buf)
+	if len(fields) == 0 {
 		return
 	}
-
-	fields := strings.Fields(buf)
 	cmdTyped := strings.ToLower(fields[0])
 
 	// Exact command match — show its usage
@@ -1250,7 +1241,7 @@ func (c *Chat) printHelp() {
 	fmt.Printf("  ── Navigation ──────────────────────────────────%s\r\n", r)
 	fmt.Printf("%s  ↑ / ↓                     %sscroll through message history%s\r\n", g, d, r)
 	fmt.Printf("%s  Tab                       %sautocomplete commands%s\r\n", g, d, r)
-	fmt.Printf("%s  ?                         %susage hint for current command (while typing /)%s\r\n", g, d, r)
+	fmt.Printf("%s  / then ?                  %susage hint for current command (e.g. /burn then ?)%s\r\n", g, d, r)
 	fmt.Printf("%s\r\n", g)
 	fmt.Printf("  ── Utility ─────────────────────────────────────%s\r\n", r)
 	fmt.Printf("%s  /clear                    %sclear the screen%s\r\n", g, d, r)
