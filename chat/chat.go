@@ -121,6 +121,14 @@ type Chat struct {
 
 	currentTopic string // room topic, shown on join and with /topic
 
+	// Pending oneties — masked on arrival, shown only on /reveal
+	pendingOnetime map[string]string // from → decrypted body
+
+	// Idle screen lock
+	lastInput time.Time
+	locked    bool
+	lockBuf   []rune
+
 	mu       sync.Mutex
 	oldState *term.State
 	rawMode  bool
@@ -128,9 +136,11 @@ type Chat struct {
 
 func New(mgr network.Backend, name string) *Chat {
 	return &Chat{
-		mgr:       mgr,
-		name:      name,
-		dmHistory: make(map[string][]dmMessage),
+		mgr:            mgr,
+		name:           name,
+		dmHistory:      make(map[string][]dmMessage),
+		pendingOnetime: make(map[string]string),
+		lastInput:      time.Now(),
 	}
 }
 
@@ -154,6 +164,7 @@ func (c *Chat) Run() {
 
 	c.bootSequence()
 	go c.receiveLoop()
+	go c.idleLockLoop()
 	c.inputLoop()
 }
 
@@ -172,6 +183,7 @@ func (c *Chat) bootSequence() {
 		}
 		c.sysf("channel open · %d peer(s) online ✓", len(peers))
 	}
+	c.sysf("/help for commands · Tab to autocomplete · ? for usage hints")
 	c.printPrompt()
 }
 
@@ -227,14 +239,19 @@ func (c *Chat) receiveLoop() {
 				time.Sleep(time.Duration(ttl) * time.Second)
 				c.mu.Lock()
 				c.clearInput()
-				fmt.Printf("%s[sys] ● burn message from %s has expired%s\r\n", dim+green, from, reset)
+				// Clear the screen when the burn expires — the content shouldn't linger
+				fmt.Print(clearScreen)
+				fmt.Printf("%s[sys] ● burn message from %s has expired · screen cleared%s\r\n", dim+green, from, reset)
 				c.printPrompt()
 				c.mu.Unlock()
 			}()
 
 		case network.MsgOneTime:
-			fmt.Printf("%s[● onetime from %s] %s%s\r\n", brightGreen, env.From, env.Body, reset)
-			fmt.Printf("%s[sys] ● burned — this message no longer exists%s\r\n", dim+green, reset)
+			// Store masked — do NOT display the content until /reveal is called.
+			// The user may not be alone. They choose when to read it.
+			c.pendingOnetime[env.From] = env.Body
+			fmt.Printf("%s[sys] ● onetime from %s — type /reveal when you're alone%s\r\n", brightGreen, env.From, reset)
+			fmt.Printf("%s[sys] ● message deleted from relay · exists only in this session%s\r\n", dim+green, reset)
 
 		case network.MsgTyping:
 			if env.Body == "1" {
@@ -300,6 +317,51 @@ func (c *Chat) inputLoop() {
 
 		c.mu.Lock()
 
+		// Update activity timestamp on every keypress
+		c.lastInput = time.Now()
+
+		// ── Locked: route all input to the unlock handler ─────────────────
+		if c.locked {
+			switch r {
+			case '\r', '\n':
+				attempt := strings.TrimSpace(string(c.lockBuf))
+				c.lockBuf = c.lockBuf[:0]
+				fmt.Print("\r\n")
+				if attempt == c.lockRoomName() {
+					c.locked = false
+					fmt.Print(clearScreen)
+					c.sysf("session restored · welcome back")
+					c.printPrompt()
+				} else {
+					fmt.Printf("%s[sys] incorrect · try again%s\r\n\r\n", dim+green, reset)
+					fmt.Printf("%s  unlock: %s", green, reset)
+				}
+			case 127, '\b':
+				if len(c.lockBuf) > 0 {
+					c.lockBuf = c.lockBuf[:len(c.lockBuf)-1]
+					masked := strings.Repeat("*", len(c.lockBuf))
+					fmt.Printf("\r%s  unlock: %s%s", green, masked, reset)
+				}
+			case 3, 4: // Ctrl+C / Ctrl+D — allow quit even when locked
+				c.mu.Unlock()
+				c.quit()
+				return
+			case '\x1b': // discard escape sequences (arrow keys etc.)
+				c.mu.Unlock()
+				reader.ReadByte() //nolint
+				reader.ReadByte() //nolint
+				continue
+			default:
+				if utf8.ValidRune(r) && r >= 32 {
+					c.lockBuf = append(c.lockBuf, r)
+					fmt.Printf("%s*%s", dim+green, reset)
+				}
+			}
+			c.mu.Unlock()
+			continue
+		}
+
+		// ── Normal input ──────────────────────────────────────────────────
 		switch r {
 		case '\r', '\n':
 			line := strings.TrimSpace(string(c.inputBuf))
@@ -376,6 +438,13 @@ func (c *Chat) inputLoop() {
 			c.mu.Unlock()
 
 		default:
+			// ? — show usage hint for the command being typed, without inserting ?
+			if r == '?' && len(c.inputBuf) > 0 && c.inputBuf[0] == '/' {
+				c.showCommandHint(string(c.inputBuf))
+				c.redrawInput()
+				c.mu.Unlock()
+				continue
+			}
 			if utf8.ValidRune(r) && r >= 32 {
 				// Insert at cursor position
 				c.inputBuf = append(c.inputBuf, 0)
@@ -441,9 +510,31 @@ func (c *Chat) historyDown() {
 }
 
 var allCommands = []string{
-	"/help", "/peers", "/dm", "/back", "/onetime", "/burn", "/away",
+	"/help", "/peers", "/dm", "/back", "/onetime", "/reveal", "/burn", "/away",
 	"/room", "/invite", "/nick", "/me", "/connect", "/clear", "/nuke", "/quit",
 	"/verify", "/topic",
+}
+
+// commandHints provides one-line usage for each command, shown when ? is pressed.
+var commandHints = map[string]string{
+	"/help":    "/help  or  /help <command>",
+	"/peers":   "/peers — list who is online",
+	"/dm":      "/dm <name>  or  /dm <name> <message>",
+	"/back":    "/back — return to group from a DM session",
+	"/onetime": `/onetime <name> "message" — burn-after-reading, one delivery then gone`,
+	"/reveal":  "/reveal  or  /reveal <name> — show a pending onetime privately",
+	"/burn":    `/burn <seconds> "message" — self-destructs for everyone · max 300s`,
+	"/away":    `/away "message"  or  /away — clear away status`,
+	"/room":    "/room <name> — switch rooms mid-session (online only)",
+	"/invite":  "/invite — print the join command for your current room",
+	"/nick":    "/nick <newname> — change your display name",
+	"/me":      "/me <action> — action message  * YOU action",
+	"/connect": "/connect <ip>  or  /connect <ip:port> — LAN mode only",
+	"/verify":  "/verify <name> — compare key fingerprints to detect MITM",
+	"/topic":   `/topic "text"  or  /topic clear`,
+	"/clear":   "/clear — clear the screen",
+	"/nuke":    "/nuke — disconnect silently, no announcement, clear screen",
+	"/quit":    "/quit — exit gracefully, announces departure",
 }
 
 // doTabComplete cycles through commands matching the current input prefix.
@@ -675,6 +766,50 @@ func (c *Chat) handleCommand(line string) {
 		c.sysf("● onetime sealed for %s · will be delivered when they open it", target)
 		c.mu.Unlock()
 		c.mgr.SendTo(target, network.Envelope{Type: network.MsgOneTime, To: target, Body: msg})
+
+	case "/reveal":
+		// /reveal [name] — show a pending onetime privately, then auto-clear
+		c.mu.Lock()
+		if len(c.pendingOnetime) == 0 {
+			c.sysf("no pending onetimes")
+			c.mu.Unlock()
+			return
+		}
+		var from, body string
+		if len(parts) >= 2 {
+			from = parts[1]
+			body = c.pendingOnetime[from]
+			if body == "" {
+				c.sysf("no pending onetime from %s", from)
+				c.mu.Unlock()
+				return
+			}
+		} else {
+			// Show the first pending one
+			for k, v := range c.pendingOnetime {
+				from, body = k, v
+				break
+			}
+		}
+		delete(c.pendingOnetime, from)
+		// Clear the screen, show the secret prominently, auto-clear after 15s
+		fmt.Print(clearScreen)
+		fmt.Printf("%s\r\n", brightGreen)
+		fmt.Printf("  ── onetime from %s ──────────────────────────────%s\r\n", strings.ToUpper(from), reset)
+		fmt.Printf("\r\n")
+		fmt.Printf("%s  %s%s\r\n", brightGreen, body, reset)
+		fmt.Printf("\r\n")
+		fmt.Printf("%s  ── screen clears in 15 seconds ────────────────%s\r\n", dim+green, reset)
+		c.printPrompt()
+		go func() {
+			time.Sleep(15 * time.Second)
+			c.mu.Lock()
+			fmt.Print(clearScreen)
+			c.sysf("onetime cleared")
+			c.printPrompt()
+			c.mu.Unlock()
+		}()
+		c.mu.Unlock()
 
 	case "/burn":
 		if len(parts) < 2 {
@@ -1002,6 +1137,80 @@ func (c *Chat) showDMHistory(peer string) {
 	fmt.Printf("%s  ──────────────────────────────────%s\r\n", dim+green, reset)
 }
 
+// showCommandHint prints usage for the command currently being typed.
+// Triggered by pressing ? while the input buffer starts with /.
+// Must be called with c.mu held.
+func (c *Chat) showCommandHint(buf string) {
+	fmt.Print(clearLine)
+	fields := strings.Fields(buf)
+	if len(fields) == 0 {
+		return
+	}
+	cmdTyped := strings.ToLower(fields[0])
+
+	// Exact command match
+	if hint, ok := commandHints[cmdTyped]; ok {
+		fmt.Printf("%s  %s%s\r\n", dim+green, hint, reset)
+		return
+	}
+
+	// Prefix match — show all candidates
+	var printed int
+	for _, cmd := range allCommands {
+		if strings.HasPrefix(cmd, cmdTyped) {
+			if hint, ok := commandHints[cmd]; ok {
+				fmt.Printf("%s  %s%s\r\n", dim+green, hint, reset)
+				printed++
+			}
+		}
+	}
+	if printed == 0 {
+		fmt.Printf("%s  no matching commands · /help for full list%s\r\n", dim+green, reset)
+	}
+}
+
+// lockRoomName returns the value the user must type to unlock the session.
+// Online mode: the room name. LAN mode: the local display name.
+func (c *Chat) lockRoomName() string {
+	type roomer interface{ RoomName() string }
+	if r, ok := c.mgr.(roomer); ok {
+		return r.RoomName()
+	}
+	return c.name
+}
+
+// idleLockLoop locks the session after 5 minutes of no keyboard activity.
+// Runs as a background goroutine for the lifetime of the session.
+func (c *Chat) idleLockLoop() {
+	const idleTimeout = 5 * time.Minute
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		c.mu.Lock()
+		idle := time.Since(c.lastInput)
+		alreadyLocked := c.locked
+		c.mu.Unlock()
+
+		if !alreadyLocked && idle >= idleTimeout {
+			c.doLock()
+		}
+	}
+}
+
+// doLock clears the screen and enters the locked state.
+// Must NOT be called with c.mu held (it acquires the lock itself).
+func (c *Chat) doLock() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.locked = true
+	c.lockBuf = c.lockBuf[:0]
+	c.clearInput()
+	fmt.Print(clearScreen)
+	fmt.Printf("%s[sys] session locked · idle for 5 minutes%s\r\n", green, reset)
+	fmt.Printf("%s[sys] type the room name to unlock · press Enter%s\r\n\r\n", dim+green, reset)
+	fmt.Printf("%s  unlock: %s", green, reset)
+}
+
 // printHelp prints the full categorised help. Must be called with c.mu held.
 func (c *Chat) printHelp() {
 	g, d, r := green, dim+green, reset
@@ -1015,6 +1224,7 @@ func (c *Chat) printHelp() {
 	fmt.Printf("%s  /dm <name> <msg>          %ssend a one-off DM%s\r\n", g, d, r)
 	fmt.Printf("%s  /back                     %sreturn to group chat from a DM session%s\r\n", g, d, r)
 	fmt.Printf("%s  /onetime <name> \"msg\"     %sburn-after-reading · held until they connect%s\r\n", g, d, r)
+	fmt.Printf("%s  /reveal [name]            %sshow a pending onetime privately · clears in 15s%s\r\n", g, d, r)
 	fmt.Printf("%s  /burn <secs> \"msg\"        %sself-destructs for everyone after N seconds%s\r\n", g, d, r)
 	fmt.Printf("%s  /away \"msg\"               %sauto-reply to DMs · prompt shows [away]%s\r\n", g, d, r)
 	fmt.Printf("%s  /away                     %sclear away status%s\r\n", g, d, r)
@@ -1028,6 +1238,7 @@ func (c *Chat) printHelp() {
 	fmt.Printf("  ── Navigation ──────────────────────────────────%s\r\n", r)
 	fmt.Printf("%s  ↑ / ↓                     %sscroll through message history%s\r\n", g, d, r)
 	fmt.Printf("%s  Tab                       %sautocomplete commands%s\r\n", g, d, r)
+	fmt.Printf("%s  ?                         %susage hint for current command (while typing /)%s\r\n", g, d, r)
 	fmt.Printf("%s\r\n", g)
 	fmt.Printf("  ── Utility ─────────────────────────────────────%s\r\n", r)
 	fmt.Printf("%s  /clear                    %sclear the screen%s\r\n", g, d, r)
@@ -1058,8 +1269,19 @@ func (c *Chat) printCommandHelp(cmd string) {
 			"Burn-after-reading message.\n" +
 				"  Delivered exactly once, then deleted from the relay forever.\n" +
 				"  If the recipient is offline, the message waits (encrypted) until they connect.\n" +
-				"  The relay never sees the plaintext.",
+				"  The relay never sees the plaintext.\n" +
+				"  The message arrives masked — type /reveal when you're alone to read it.",
 			`/onetime MARK "meet at the usual place"`,
+		},
+		"reveal": {
+			"/reveal  or  /reveal <name>",
+			"Show a pending onetime message privately.\n" +
+				"  Incoming onetimes are masked on arrival — the content is never shown\n" +
+				"  automatically, because someone may be watching your screen.\n" +
+				"  /reveal clears the screen, shows the secret prominently, and wipes\n" +
+				"  the display automatically after 15 seconds.\n" +
+				"  If multiple onetimes are waiting, /reveal <name> picks a specific sender.",
+			"/reveal\n  /reveal ALEX",
 		},
 		"burn": {
 			`/burn <seconds> "message"`,
