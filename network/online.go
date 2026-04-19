@@ -7,12 +7,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
 )
@@ -128,11 +131,13 @@ func (m *OnlineManager) SwitchRoom(newRoom string) {
 	m.connMu.Unlock()
 }
 
+// deriveRoomKey derives a 32-byte room encryption key from the room name.
+// Argon2id makes brute-forcing weak room names expensive even on GPU hardware.
+// Parameters: time=3, memory=64MB, threads=4 — ~200ms on typical hardware.
+// Salt is deterministic so all peers independently derive the same key.
 func deriveRoomKey(roomName string) []byte {
-	r := hkdf.New(sha256.New, []byte(roomName), []byte("porfavor-salt"), []byte("porfavor-room-v1"))
-	key := make([]byte, chacha20poly1305.KeySize)
-	_, _ = io.ReadFull(r, key)
-	return key
+	salt := sha256.Sum256([]byte("porfavor-room-salt-v2:" + roomName))
+	return argon2.IDKey([]byte(roomName), salt[:], 3, 64*1024, 4, chacha20poly1305.KeySize)
 }
 
 func deriveSharedKey(priv *ecdh.PrivateKey, peerPubBytes []byte) ([]byte, error) {
@@ -393,6 +398,25 @@ func (m *OnlineManager) HasPeer(name string) bool {
 	defer m.peersMu.RUnlock()
 	_, ok := m.peers[name]
 	return ok
+}
+
+// DMKeyFingerprint returns a short human-readable fingerprint of the DM key
+// shared with peer. Both sides display the same fingerprint if the relay did
+// not substitute any pubkeys during key exchange (MITM check).
+// Returns "" if no DM key exists yet for that peer.
+func (m *OnlineManager) DMKeyFingerprint(peer string) string {
+	m.peersMu.RLock()
+	p := m.peers[peer]
+	m.peersMu.RUnlock()
+	if p == nil || p.dmKey == nil {
+		return ""
+	}
+	hash := sha256.Sum256(p.dmKey)
+	parts := make([]string, 8)
+	for i := range parts {
+		parts[i] = fmt.Sprintf("%02x", hash[i])
+	}
+	return strings.Join(parts, ":")
 }
 
 func (m *OnlineManager) UpdateName(newName string) {

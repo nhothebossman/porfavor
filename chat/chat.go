@@ -370,6 +370,7 @@ func (c *Chat) historyDown() {
 var allCommands = []string{
 	"/help", "/peers", "/dm", "/back", "/onetime", "/burn", "/away",
 	"/room", "/invite", "/nick", "/me", "/connect", "/clear", "/nuke", "/quit",
+	"/verify", "/topic",
 }
 
 // doTabComplete cycles through commands matching the current input prefix.
@@ -732,6 +733,35 @@ func (c *Chat) handleCommand(line string) {
 		c.sysf("topic set: %s", topic)
 		c.mu.Unlock()
 		c.mgr.Send(network.Envelope{Type: network.MsgTopic, Body: topic})
+
+	case "/verify":
+		type verifier interface {
+			DMKeyFingerprint(peer string) string
+		}
+		v, ok := c.mgr.(verifier)
+		if !ok {
+			c.mu.Lock()
+			c.sysf("/verify is only available in online mode")
+			c.mu.Unlock()
+			return
+		}
+		if len(parts) < 2 {
+			c.mu.Lock()
+			c.sysf("usage: /verify <name>  — compare fingerprint out-of-band to detect MITM")
+			c.mu.Unlock()
+			return
+		}
+		peer := parts[1]
+		fp := v.DMKeyFingerprint(peer)
+		c.mu.Lock()
+		if fp == "" {
+			c.sysf("no DM key for %s yet — open a DM session first: /dm %s hi", peer, peer)
+		} else {
+			fmt.Printf("%s  key fingerprint with %s:\r\n", green, peer)
+			fmt.Printf("%s  %s%s\r\n", brightGreen, fp, reset)
+			fmt.Printf("%s  ask %s to run /verify %s and compare — if they match, no MITM%s\r\n", dim+green, peer, c.name, reset)
+		}
+		c.mu.Unlock()
 
 	case "/nuke":
 		c.restore()
